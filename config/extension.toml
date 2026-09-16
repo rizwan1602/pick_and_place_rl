@@ -1,0 +1,13 @@
+[package]
+title = "Ball Pick Place Training Environment"
+version = "1.0.0"
+category = "Robotics"
+description = "Isaac Lab RL environment for training Franka Panda to pick balls and place in bucket"
+authors = ["Rizwan"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+
+[[python.module]]
+name = "ball_pick_place"

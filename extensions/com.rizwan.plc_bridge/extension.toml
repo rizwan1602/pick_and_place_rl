@@ -1,0 +1,15 @@
+[package]
+title = "Siemens PLC OPC UA Bridge"
+version = "1.0.0"
+category = "Industrial"
+description = "OPC UA connection to Siemens PLC with live status indicator, DB bit addressing, and Timeline Play/Pause automation"
+authors = ["Rizwan"]
+
+[[python.module]]
+name = "plc_bridge"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.usd.core" = {}
