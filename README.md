@@ -46,7 +46,7 @@ The arm picks the ball, lifts it, carries it to the container, drops it cleanly,
 
 ![Pick and place demo](docs/videos/ppoc.gif)
 
-[📹 Watch full video](docs/videos/01_smooth_pick_and_place.mp4)
+[📹 Watch full video (1080p)](docs/videos/ppoc.mp4)
 
 </div>
 
@@ -58,7 +58,7 @@ The Omniverse extension connects to the PLC over OPC UA. **START** writes bit `1
 
 ![PLC integration demo](docs/videos/final_video.gif)
 
-[📹 Watch full video](docs/videos/02_siemens_plc_integration.mp4)
+[📹 Watch full video (1080p)](docs/videos/final_video.mp4)
 
 </div>
 
@@ -70,7 +70,7 @@ Mid-cycle, the ball gets teleported to a random spot on the table. The vision pi
 
 ![Ball randomization demo](docs/videos/live_random_pos.gif)
 
-[📹 Watch full video](docs/videos/03_realtime_ball_randomization.mp4)
+[📹 Watch full video (1080p)](docs/videos/live_random_pos.mp4)
 
 </div>
 
