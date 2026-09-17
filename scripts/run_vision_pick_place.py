@@ -29,6 +29,7 @@ os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 
 parser = argparse.ArgumentParser(description="Vision-Guided Pick-and-Place for Franka Panda")
 parser.add_argument("--num_cycles", type=int, default=5, help="Number of pick-and-place cycles to run (default: 5)")
+parser.add_argument("--show_camera", action="store_true", default=True, help="Display live OpenCV camera window")
 
 # Ensure cameras are enabled in the AppLauncher rendering pipeline
 if "--enable_cameras" not in sys.argv:
@@ -47,6 +48,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # ── 2. Imports AFTER SimulationApp is launched ────────────────────────────────
+import cv2
 import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -393,7 +395,34 @@ def main():
         sim.step()
         scene.update(sim_cfg.dt)
 
-    # ── 8. Final Performance Report ───────────────────────────────────────────
+        # ── 8. Live OpenCV Camera Preview Window ──────────────────────────────
+        if args_cli.show_camera and not getattr(args_cli, "headless", False):
+            try:
+                rgb_data = camera.data.output["rgb"][0, :, :, :3]
+                if rgb_data.dtype != torch.uint8:
+                    rgb_data = (rgb_data * 255).clamp(0, 255).to(torch.uint8)
+                rgb_np = rgb_data.cpu().numpy()
+                bgr = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2BGR)
+
+                # Draw status banner
+                cv2.rectangle(bgr, (5, 5), (420, 110), (20, 20, 20), -1)
+                cv2.rectangle(bgr, (5, 5), (420, 110), (0, 255, 128), 1)
+                cv2.putText(bgr, f"Stage 2 Vision | Cycle {cycle_count + 1}/{args_cli.num_cycles}", (15, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(bgr, f"State: {STATE_NAMES[state].split(' ')[0]}", (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 0), 2)
+                cv2.putText(bgr, f"Vision Ball 3D: ({target_vision_x:.3f}, {target_vision_y:.3f}) m", (15, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 200, 255), 2)
+                cv2.putText(bgr, f"Ground Truth: ({true_x:.3f}, {true_y:.3f}) m", (15, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+
+                cv2.imshow("Overhead 3D Camera Feed (Live POV)", bgr)
+                cv2.waitKey(1)
+            except Exception:
+                pass
+
+    try:
+        cv2.destroyAllWindows()
+    except Exception:
+        pass
+
+    # ── 9. Final Performance Report ───────────────────────────────────────────
     print("\n" + "=" * 88)
     print("  STAGE 2: VISION-GUIDED PICK-AND-PLACE PERFORMANCE REPORT")
     print("=" * 88)
