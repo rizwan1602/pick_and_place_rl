@@ -196,26 +196,36 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    """Rebalanced reward pipeline — hold ~12/step vs place ~37/step (3.1x ratio).
+    """Staged, monotonically increasing reward pipeline matching IK behavior.
     
-    Carry rewards deliberately small so holding is never competitive with placing.
-    Release uses smooth tanh corridor instead of hard step functions.
+    Potential values step-by-step:
+      1. Reach:   0 -> 12 pts (Broad 8.0 + Fine 4.0)
+      2. Grasp:   0 -> 5 pts  (Finger clamp near ball)
+      3. Lift:    0 -> 15 pts (Ball raised above table)
+      4. Transit: 0 -> 10 pts (Carry towards bucket)
+      5. Release: 0 -> 8 pts  (Open fingers above bucket)
+      6. Place:   30 pts      (Ball resting inside cavity)
     """
-    # ── Carry chain: deliberately small. Their sum is the reward the policy
-    #    earns by holding the ball near the bucket forever, and it must stay
-    #    well below `placing`.
-    reaching       = RewTerm(func=custom_mdp.reaching_reward,        params={"std": 0.10}, weight=1.5)
-    lifting        = RewTerm(func=custom_mdp.lifting_reward,                               weight=3.0)
-    bucket_coarse  = RewTerm(func=custom_mdp.bucket_tracking_coarse, params={"std": 0.25}, weight=4.0)
-    bucket_fine    = RewTerm(func=custom_mdp.bucket_tracking_fine,   params={"std": 0.05}, weight=2.0)
+    # ── Stage 1: Approach the ball (Broad + Fine)
+    reaching_coarse = RewTerm(func=custom_mdp.reaching_reward,      params={"std": 0.25}, weight=8.0)
+    reaching_fine   = RewTerm(func=custom_mdp.reaching_reward_fine, params={"std": 0.05}, weight=4.0)
 
-    # ── The commitment step. Smooth corridor, so there is gradient toward it.
-    release        = RewTerm(func=custom_mdp.release_reward,                               weight=6.0)
+    # ── Stage 2: Grasp the ball (Clamp fingers when at ball)
+    grasping        = RewTerm(func=custom_mdp.grasping_reward,                             weight=5.0)
 
-    # ── The goal. Dominant by a wide margin.
-    placing        = RewTerm(func=custom_mdp.placing_reward,                               weight=35.0)
+    # ── Stage 3: Lift the ball off table
+    lifting         = RewTerm(func=custom_mdp.lifting_reward,                              weight=15.0)
 
-    # ── Posture
+    # ── Stage 4: Transit to bucket
+    bucket_tracking = RewTerm(func=custom_mdp.bucket_tracking_coarse, params={"std": 0.25}, weight=10.0)
+
+    # ── Stage 5: Release above bucket
+    release         = RewTerm(func=custom_mdp.release_reward,                              weight=8.0)
+
+    # ── Stage 6: Place inside cavity (Dominant goal milestone)
+    placing         = RewTerm(func=custom_mdp.placing_reward,                              weight=30.0)
+
+    # ── Posture & Clearance
     ee_orientation  = RewTerm(func=custom_mdp.ee_downward_orientation_reward, weight=2.0)
     table_clearance = RewTerm(func=custom_mdp.arm_table_clearance_penalty,    weight=-5.0)
 
@@ -228,7 +238,7 @@ class RewardsCfg:
 
 @configclass
 class EventCfg:
-    """Reset events with curriculum for ball placement."""
+    """Reset events: ball always spawns on table (zero bucket cheat)."""
     reset_robot = EventTerm(
         func=mdp.reset_joints_by_scale,
         mode="reset",
@@ -245,8 +255,8 @@ class EventCfg:
             "ball_cfg": SceneEntityCfg("ball"),
             "table_x_range": (0.28, 0.42),
             "table_y_range": (-0.12, 0.12),
-            "start_fraction": 0.6,      # 60% of resets begin with ball placed
-            "anneal_steps": 38_400,     # Exactly 800 iterations (800 iters x 48 steps)
+            "start_fraction": 0.0,      # 0% bucket resets - BALL ALWAYS SPAWNS ON TABLE!
+            "anneal_steps": 1,
         },
     )
 

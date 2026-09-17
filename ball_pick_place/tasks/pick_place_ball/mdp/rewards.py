@@ -97,19 +97,15 @@ def is_ball_in_bucket(env: ManagerBasedRLEnv, ball_cfg: SceneEntityCfg) -> torch
     return (inside_x & inside_y & inside_z & settled).float()
 
 
-# ── Stage 1: Reach ───────────────────────────────────────────────────────────
+# ── Stage 1: Reach (Broad + Fine) ───────────────────────────────────────────
 
 def reaching_reward(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    std: float = 0.10,
+    std: float = 0.25,
 ) -> torch.Tensor:
-    """Smooth pull of the end-effector toward the ball.
-
-    Suppressed once the ball is placed, so the policy is free to retract
-    without bleeding reward.
-    """
+    """Broad smooth pull of the end-effector toward the ball from across the table."""
     distance = torch.norm(
         _ee_pos(env, ee_frame_cfg) - env.scene[ball_cfg.name].data.root_pos_w, dim=-1
     )
@@ -117,32 +113,64 @@ def reaching_reward(
     return reward * (1.0 - is_ball_in_bucket(env, ball_cfg))
 
 
-# ── Stage 2: Lift ────────────────────────────────────────────────────────────
+def reaching_reward_fine(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    std: float = 0.05,
+) -> torch.Tensor:
+    """Precision alignment pulling fingertips onto the ball surface."""
+    distance = torch.norm(
+        _ee_pos(env, ee_frame_cfg) - env.scene[ball_cfg.name].data.root_pos_w, dim=-1
+    )
+    reward = 1.0 - torch.tanh(distance / std)
+    return reward * (1.0 - is_ball_in_bucket(env, ball_cfg))
+
+
+# ── Stage 2: Grasp (Clamp fingers when at ball) ──────────────────────────────
+
+def grasping_reward(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward closing gripper fingers when the end-effector is around the ball."""
+    ball_pos = env.scene[ball_cfg.name].data.root_pos_w
+    dist_to_ee = torch.norm(_ee_pos(env, ee_frame_cfg) - ball_pos, dim=-1)
+    near_ball = (dist_to_ee < 0.045).float()
+
+    finger = _finger_opening(env, robot_cfg)
+    # Fingers range from 0.04 (fully open) to 0.00 (clamped)
+    clamp_progress = torch.clamp((0.04 - finger) / 0.04, 0.0, 1.0)
+
+    return near_ball * clamp_progress * (1.0 - is_ball_in_bucket(env, ball_cfg))
+
+
+# ── Stage 3: Lift ────────────────────────────────────────────────────────────
 
 def lifting_reward(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    lift_target_height: float = 0.10,
+    lift_target_height: float = 0.12,
 ) -> torch.Tensor:
-    """Continuous vertical progress while the ball is actually held.
-
-    No in-bucket credit preservation: placing pays far more than lifting, so
-    there is nothing to protect.
-    """
+    """Continuous lift progress + discrete milestone bonus when ball leaves table."""
     ball_pos = env.scene[ball_cfg.name].data.root_pos_w
     p = ball_pos - env.scene.env_origins
 
     dist_to_ee = torch.norm(_ee_pos(env, ee_frame_cfg) - ball_pos, dim=-1)
-    held = 1.0 - torch.tanh(dist_to_ee / 0.08)
+    held = 1.0 - torch.tanh(dist_to_ee / 0.06)
 
     height_above_rest = p[:, 2] - BALL_REST_Z_ON_TABLE
-    lift_progress = torch.clamp(height_above_rest / lift_target_height, 0.0, 1.0)
+    continuous_lift = torch.clamp(height_above_rest / lift_target_height, 0.0, 1.0)
+    # Milestone: ball has clearly lifted off the table surface (> 2.5 cm)
+    is_lifted = (height_above_rest > 0.025).float()
 
-    return held * lift_progress * (1.0 - is_ball_in_bucket(env, ball_cfg))
+    return held * (continuous_lift + is_lifted) * (1.0 - is_ball_in_bucket(env, ball_cfg))
 
 
-# ── Stage 3: Carry (coarse) ──────────────────────────────────────────────────
+# ── Stage 4: Carry to Bucket ─────────────────────────────────────────────────
 
 def bucket_tracking_coarse(
     env: ManagerBasedRLEnv,
@@ -150,19 +178,13 @@ def bucket_tracking_coarse(
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
     std: float = 0.25,
 ) -> torch.Tensor:
-    """Broad gradient pulling a held, lifted ball toward the carry waypoint.
-
-    Carry waypoint is (0.35, 0.30, 0.550) -- 7.5 cm above the ACTUAL rim top of
-    0.475, giving 4.5 cm of ball-bottom clearance. The original code targeted
-    0.540 while its comment assumed a rim at 0.520; the number was workable but
-    the reasoning behind it was wrong by 4.5 cm.
-    """
+    """Broad gradient pulling a held, lifted ball toward the carry waypoint."""
     ball_pos = env.scene[ball_cfg.name].data.root_pos_w
     p = ball_pos - env.scene.env_origins
 
-    is_lifted = (p[:, 2] > (TABLE_TOP_Z + 0.05)).float()
+    is_lifted = (p[:, 2] > (TABLE_TOP_Z + 0.035)).float()
     dist_to_ee = torch.norm(_ee_pos(env, ee_frame_cfg) - ball_pos, dim=-1)
-    held = 1.0 - torch.tanh(dist_to_ee / 0.08)
+    held = 1.0 - torch.tanh(dist_to_ee / 0.07)
 
     target = torch.tensor(CARRY_TARGET, device=env.device).unsqueeze(0)
     distance = torch.norm(p - target, dim=-1)
@@ -172,50 +194,20 @@ def bucket_tracking_coarse(
     )
 
 
-# ── Stage 4: Carry (fine) ────────────────────────────────────────────────────
-
-def bucket_tracking_fine(
-    env: ManagerBasedRLEnv,
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    std: float = 0.05,
-) -> torch.Tensor:
-    """Precision centring of the held ball over the cavity opening."""
-    p = _ball_pos_env(env, ball_cfg)
-    is_lifted = (p[:, 2] > (TABLE_TOP_Z + 0.05)).float()
-
-    target = torch.tensor(CARRY_TARGET, device=env.device).unsqueeze(0)
-    distance = torch.norm(p - target, dim=-1)
-
-    return is_lifted * (1.0 - torch.tanh(distance / std)) * (
-        1.0 - is_ball_in_bucket(env, ball_cfg)
-    )
-
-
-# ── Stage 5: Release (smooth corridor) ───────────────────────────────────────
+# ── Stage 5: Release ─────────────────────────────────────────────────────────
 
 def release_reward(
     env: ManagerBasedRLEnv,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward opening the fingers inside the drop corridor.
-
-    The original implementation was `is_centered * is_above_rim * is_open`, a
-    product of three hard indicators: zero gradient everywhere except on the
-    exact success manifold, so the policy had no way to discover it. It also
-    used `z > 0.47` as "above rim" when the rim top is 0.475 and the ball centre
-    must exceed 0.505 to clear it at all.
-
-    This version is a product of smooth kernels, so the policy gets increasing
-    credit as it approaches a valid drop pose with the gripper opening.
-    """
+    """Reward opening the fingers inside the drop corridor."""
     p = _ball_pos_env(env, ball_cfg)
 
     xy_dist = torch.norm(
         p[:, :2] - torch.tensor([BUCKET_X, BUCKET_Y], device=env.device), dim=-1
     )
     xy_term = 1.0 - torch.tanh(xy_dist / RELEASE_XY_TOL)
-
     z_term = 1.0 - torch.tanh((p[:, 2] - RELEASE_Z).abs() / 0.04)
 
     finger = _finger_opening(env, robot_cfg)
