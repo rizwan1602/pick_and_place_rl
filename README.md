@@ -237,6 +237,9 @@ NVIDIA Isaac Sim / PhysX 5 GPU
 │   ├── bucket.usd                  # Container asset
 │   └── runtime_scene.usd           # Full workcell stage
 │
+├── weights/
+│   └── model_499.pt                # Pre-trained PPO checkpoint (ready to use)
+│
 ├── docs/
 │   ├── images/                     # Benchmark charts
 │   └── videos/                     # Demo recordings
@@ -275,7 +278,8 @@ cd path/to/this/repo
 <path-to-isaaclab>/isaaclab.bat -p scripts/train.py --task BallPickPlace-Franka-v0 --num_envs 4096 --headless
 
 # Stage 4 — Run everything (RL + vision + PLC)
-<path-to-isaaclab>/isaaclab.bat -p scripts/play.py --checkpoint <path-to-checkpoint>/model_499.pt
+# A pre-trained checkpoint is included in weights/
+<path-to-isaaclab>/isaaclab.bat -p scripts/play.py --checkpoint weights/model_499.pt
 ```
 
 ---
