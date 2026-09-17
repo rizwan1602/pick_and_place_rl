@@ -13,33 +13,27 @@ The system was evaluated through three experiments, demonstrating baseline motio
 ### 1. Motion Smoothness & Baseline Pick-and-Place
 *Evaluation of the Franka arm's continuous trajectory. The arm moves smoothly between waypoints, descends vertically onto the ball, and transfers it into the container without vibration or jitter.*
 
-https://github.com/rizwan1602/pick_and_place_rl/raw/main/docs/videos/ppoc.mp4
+[![1. Motion Smoothness & Baseline Pick-and-Place](docs/videos/ppoc.gif)](docs/videos/ppoc.mp4)
 
-<video src="docs/videos/ppoc.mp4" controls="controls" width="100%" style="max-width: 800px; border-radius: 8px;"></video>
-
-[Direct Link to Video: `docs/videos/ppoc.mp4`](docs/videos/ppoc.mp4)
+> 🎥 **Watch Full Video**: [View / Download Full 1080p Video (`docs/videos/ppoc.mp4`)](docs/videos/ppoc.mp4)
 
 ---
 
 ### 2. End-to-End Digital Twin with Siemens S7 PLC Integration
 *Full industrial digital twin workflow. The Omniverse Siemens PLC extension docks into the bottom-right panel and connects via OPC UA (`opc.tcp://192.168.0.1:4840`). Pressing **START** writes bit `1` to `Data_block_1.start`, initiating the pick-and-place cycle. Pressing **STOP** writes `0` to halt motion, and **RESET** returns the arm to its standby home pose while resetting the ball to the table.*
 
-https://github.com/rizwan1602/pick_and_place_rl/raw/main/docs/videos/final_video.mp4
+[![2. End-to-End Digital Twin with Siemens S7 PLC Integration](docs/videos/final_video.gif)](docs/videos/final_video.mp4)
 
-<video src="docs/videos/final_video.mp4" controls="controls" width="100%" style="max-width: 800px; border-radius: 8px;"></video>
-
-[Direct Link to Video: `docs/videos/final_video.mp4`](docs/videos/final_video.mp4)
+> 🎥 **Watch Full Video**: [View / Download Full 1080p Video (`docs/videos/final_video.mp4`)](docs/videos/final_video.mp4)
 
 ---
 
 ### 3. Dynamic Re-Planning: Real-Time Ball Randomization
 *Test of online trajectory adaptation. After the cycle begins, the ball position is randomized across the table surface. The perception and control pipeline immediately recalculates the target position and smoothly redirects the arm to the new pick location.*
 
-https://github.com/rizwan1602/pick_and_place_rl/raw/main/docs/videos/live_random_pos.mp4
+[![3. Dynamic Re-Planning: Real-Time Ball Randomization](docs/videos/live_random_pos.gif)](docs/videos/live_random_pos.mp4)
 
-<video src="docs/videos/live_random_pos.mp4" controls="controls" width="100%" style="max-width: 800px; border-radius: 8px;"></video>
-
-[Direct Link to Video: `docs/videos/live_random_pos.mp4`](docs/videos/live_random_pos.mp4)
+> 🎥 **Watch Full Video**: [View / Download Full 1080p Video (`docs/videos/live_random_pos.mp4`)](docs/videos/live_random_pos.mp4)
 
 ---
 
