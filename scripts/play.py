@@ -61,6 +61,17 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 import ball_pick_place
 from ball_pick_place.agents.rsl_rl_ppo_cfg import BallPickPlacePPORunnerCfg
 from ball_pick_place.tasks.pick_place_ball.mdp.rewards import is_ball_in_bucket
+from ball_pick_place.tasks.pick_place_ball.mdp.geometry import (
+    BUCKET_X,
+    BUCKET_Y,
+    BUCKET_RIM_TOP_Z,
+    BALL_REST_Z_IN_BUCKET,
+    HAND_HOVER_Z,
+    IN_BUCKET_XY_HALF,
+    IN_BUCKET_Z_MIN,
+    IN_BUCKET_Z_MAX,
+    IN_BUCKET_MAX_SPEED,
+)
 
 # Physical Home / Standby position coordinates
 STANDBY_POS_W = [0.25, -0.22, 0.65]
@@ -109,17 +120,23 @@ def main():
         try:
             cv2.namedWindow("Overhead 3D Camera - Autonomous RL Demonstration", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Overhead 3D Camera - Autonomous RL Demonstration", 640, 480)
+            cv2.setWindowProperty("Overhead 3D Camera - Autonomous RL Demonstration", cv2.WND_PROP_TOPMOST, 1)
         except Exception:
             args_cli.show_camera = False
 
     # State Machine Variables
     STATE_RL = "RL_POLICY"
-    STATE_RETRACT = "RETRACT"
+    STATE_RELEASE = "RELEASE_AND_LIFT"
+    STATE_SETTLE = "VERIFY_SETTLE"
+    STATE_RETRACT = "RETRACT_HOME"
     state = STATE_RL
 
     cycle_count = 0
     cycle_start_time = time.time()
     total_steps = 0
+    release_step = 0
+    settle_step = 0
+    consecutive_settled = 0
     retract_step = 0
     filtered_action = None
     results = []
@@ -147,29 +164,115 @@ def main():
                     # Pass binary gripper action through directly
                     filtered_action[:, 3] = raw_action[:, 3]
 
+                # Inspect scene state
+                ball_pos_w = env.unwrapped.scene["ball"].data.root_pos_w
+                ee_pos_w = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :]
+                env_origins = env.unwrapped.scene.env_origins
+
+                ball_pos_env = ball_pos_w - env_origins
+                ee_pos_env = ee_pos_w - env_origins
+
+                bucket_xy = torch.tensor([BUCKET_X, BUCKET_Y], device=env.unwrapped.device)
+                dist_ee_bucket_xy = torch.norm(ee_pos_env[0, :2] - bucket_xy).item()
+                dist_ball_bucket_xy = torch.norm(ball_pos_env[0, :2] - bucket_xy).item()
+                dist_ee_ball = torch.norm(ee_pos_w[0] - ball_pos_w[0]).item()
+
+                # Safety Interlock:
+                # If the ball is lifted (>0.48m) and securely held by the gripper (dist < 0.08m),
+                # force fingers firmly CLOSED (-1.0) while in horizontal transit towards the bucket.
+                # Do not permit opening until the arm has arrived directly over the cavity (<= 0.045m).
+                # This completely eliminates premature fling into the rim while moving at speed!
+                is_holding = (ball_pos_env[0, 2].item() > 0.48) and (dist_ee_ball < 0.08)
+                if is_holding and dist_ee_bucket_xy > 0.045:
+                    filtered_action[:, 3] = -1.0
+
                 # Step physics
                 obs, rew, dones, extras = env.step(filtered_action)
 
-                # Check if ball has successfully entered the bucket cavity
-                ball_placed = is_ball_in_bucket(env.unwrapped, ball_entity_cfg).item() > 0.5
+                # Check if arm has brought the ball over the bucket cavity
+                over_bucket = (dist_ee_bucket_xy <= 0.045) and (ee_pos_env[0, 2].item() <= 0.62)
+                in_bucket = is_ball_in_bucket(env.unwrapped, ball_entity_cfg).item() > 0.5
 
-                if ball_placed:
+                if (is_holding and over_bucket) or in_bucket:
+                    state = STATE_RELEASE
+                    release_step = 0
+                    filtered_action = None
+
+            elif state == STATE_RELEASE:
+                # ── Vertical Release & Lift Corridor ────────────────────────
+                # Open fingers fully and ascend vertically (+Z) to 0.62m (14.5cm above rim)
+                # while holding (X, Y) steady directly above bucket center.
+                # This guarantees zero lateral dragging of the ball out of the cavity!
+                ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
+                target_z = 0.62
+
+                release_act = torch.zeros(1, 4, device=env.unwrapped.device)
+                # Keep centered directly over bucket
+                release_act[0, 0] = torch.clamp((BUCKET_X - ee_pos[0, 0]) * 3.0, -0.2, 0.2)
+                release_act[0, 1] = torch.clamp((BUCKET_Y - ee_pos[0, 1]) * 3.0, -0.2, 0.2)
+                # Lift upward
+                release_act[0, 2] = torch.clamp((target_z - ee_pos[0, 2]) * 3.0, -0.1, 0.5)
+                release_act[0, 3] = 1.0  # Fully open fingers
+
+                obs, rew, dones, extras = env.step(release_act)
+                release_step += 1
+
+                # Fingertips have cleared bucket rim (ee_pos_z >= 0.58) and fingers had time to open (>= 15 steps / 0.3s)
+                if ee_pos[0, 2].item() >= 0.58 and release_step >= 15:
+                    state = STATE_SETTLE
+                    settle_step = 0
+                    consecutive_settled = 0
+
+            elif state == STATE_SETTLE:
+                # ── True Settling Verification ──────────────────────────────
+                # Hover end-effector above bucket with fingers open while verifying
+                # the ball is resting on the bucket floor with low velocity.
+                ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
+                target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device)
+                delta = target_pose - ee_pos
+
+                hover_act = torch.zeros(1, 4, device=env.unwrapped.device)
+                hover_act[0, :3] = torch.clamp(delta * 2.0, -0.2, 0.2)
+                hover_act[0, 3] = 1.0
+
+                obs, rew, dones, extras = env.step(hover_act)
+                settle_step += 1
+
+                # Verify resting position and speed inside bucket cavity
+                ball_pos_env = env.unwrapped.scene["ball"].data.root_pos_w - env.unwrapped.scene.env_origins
+                inside_x = abs(ball_pos_env[0, 0].item() - BUCKET_X) < IN_BUCKET_XY_HALF
+                inside_y = abs(ball_pos_env[0, 1].item() - BUCKET_Y) < IN_BUCKET_XY_HALF
+                inside_z = (ball_pos_env[0, 2].item() >= IN_BUCKET_Z_MIN) and (ball_pos_env[0, 2].item() <= IN_BUCKET_Z_MAX)
+                ball_vel_w = env.unwrapped.scene["ball"].data.root_lin_vel_w
+                ball_speed = torch.norm(ball_vel_w, dim=-1).item()
+
+                is_resting = inside_x and inside_y and inside_z and (ball_speed < 0.20)
+                if is_resting:
+                    consecutive_settled += 1
+                else:
+                    consecutive_settled = 0
+
+                if consecutive_settled >= 5:
                     duration = time.time() - cycle_start_time
                     cycle_count += 1
                     results.append((cycle_count, duration, "SUCCESS"))
-                    print(f" [RESULT] Cycle {cycle_count}/{args_cli.num_cycles}: SUCCESS! Ball placed inside cavity in {duration:.2f}s! -> Retracting to Home...", flush=True)
-
+                    print(f" [RESULT] Cycle {cycle_count}/{args_cli.num_cycles}: SUCCESS! Ball placed & settled in cavity in {duration:.2f}s! -> Retracting to Home...", flush=True)
                     state = STATE_RETRACT
                     retract_step = 0
-                    filtered_action = None
+                elif settle_step >= 40:  # Timeout after ~0.8s: ball missed or bounced out
+                    duration = time.time() - cycle_start_time
+                    cycle_count += 1
+                    results.append((cycle_count, duration, "FAILED"))
+                    print(f" [RESULT] Cycle {cycle_count}/{args_cli.num_cycles}: FAILED! Ball missed cavity (speed={ball_speed:.2f}m/s, z={ball_pos_env[0,2]:.3f})! -> Retracting to Home...", flush=True)
+                    state = STATE_RETRACT
+                    retract_step = 0
 
             elif state == STATE_RETRACT:
-                # Smoothly glide end-effector back to Standby Home Pose
+                # ── Retract to Standby Home Pose ────────────────────────────
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
                 delta = home_tensor - ee_pos
                 dist_to_home = torch.norm(delta).item()
 
-                # Command Cartesian delta towards Home
                 retract_act = torch.zeros(1, 4, device=env.unwrapped.device)
                 retract_act[:, :3] = torch.clamp(delta * 2.0, -0.6, 0.6)
                 retract_act[:, 3] = 1.0  # Keep fingers open
@@ -183,10 +286,12 @@ def main():
 
                     if args_cli.num_cycles and cycle_count >= args_cli.num_cycles:
                         print("\n" + "=" * 78)
-                        print("  DEMONSTRATION COMPLETED SUCCESSFULLY")
-                        print(f"  Total Cycles: {cycle_count} | Success Rate: 100.0%")
-                        avg_time = np.mean([r[1] for r in results]) if results else 0
-                        print(f"  Average Cycle Time: {avg_time:.2f} seconds")
+                        print("  DEMONSTRATION COMPLETED")
+                        success_count = sum(1 for r in results if r[2] == "SUCCESS")
+                        rate = (success_count / cycle_count) * 100.0 if cycle_count else 0
+                        print(f"  Total Cycles: {cycle_count} | Success Rate: {rate:.1f}%")
+                        avg_time = np.mean([r[1] for r in results if r[2] == "SUCCESS"]) if success_count else 0
+                        print(f"  Average Success Cycle Time: {avg_time:.2f} seconds")
                         print("=" * 78 + "\n")
                         break
 
@@ -217,8 +322,21 @@ def main():
                     # Header banner
                     cv2.rectangle(bgr, (0, 0), (w, 52), (18, 18, 18), -1)
                     cv2.putText(bgr, "AUTONOMOUS DEEP REINFORCEMENT LEARNING (PPO)", (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2)
-                    st_str = "STATE: [1/2] RL POLICY PICK & PLACE" if state == STATE_RL else "STATE: [2/2] RETRACTING TO HOME"
-                    st_color = (0, 255, 0) if state == STATE_RL else (0, 215, 255)
+                    if state == STATE_RL:
+                        st_str = "STATE: [1/4] NEURAL RL APPROACH & TRANSIT"
+                        st_color = (0, 255, 255)
+                    elif state == STATE_RELEASE:
+                        st_str = "STATE: [2/4] VERTICAL RELEASE & LIFT"
+                        st_color = (255, 200, 0)
+                    elif state == STATE_SETTLE:
+                        st_str = "STATE: [3/4] CAVITY SETTLE VERIFICATION"
+                        st_color = (0, 255, 0)
+                    elif state == STATE_RETRACT:
+                        st_str = "STATE: [4/4] RETRACTING TO STANDBY HOME"
+                        st_color = (0, 215, 255)
+                    else:
+                        st_str = f"STATE: {state}"
+                        st_color = (255, 255, 255)
                     cv2.putText(bgr, f"{st_str} | Cycle {cycle_count + 1}/{args_cli.num_cycles}", (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.45, st_color, 1)
 
                     # Footer banner
