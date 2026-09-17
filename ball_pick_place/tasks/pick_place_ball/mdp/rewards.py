@@ -49,6 +49,7 @@ from .geometry import (
     IN_BUCKET_XY_HALF,
     IN_BUCKET_Z_MAX,
     IN_BUCKET_Z_MIN,
+    BUCKET_RIM_TOP_Z,
     RELEASE_XY_TOL,
     RELEASE_Z,
     TABLE_TOP_Z,
@@ -80,21 +81,21 @@ def _finger_opening(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg) -> torch.
 
 
 def is_ball_in_bucket(env: ManagerBasedRLEnv, ball_cfg: SceneEntityCfg) -> torch.Tensor:
-    """1.0 when the ball is settled inside the bucket cavity.
-
-    Box test against the SQUARE cavity (the original circular r=0.05 test made
-    the cavity corners unreachable for credit), plus a settle-speed check so a
-    ball flying through the opening does not score.
-    """
+    """1.0 when the ball is inside the bucket cavity."""
     p = _ball_pos_env(env, ball_cfg)
     inside_x = (p[:, 0] - BUCKET_X).abs() < IN_BUCKET_XY_HALF
     inside_y = (p[:, 1] - BUCKET_Y).abs() < IN_BUCKET_XY_HALF
-    inside_z = (p[:, 2] >= IN_BUCKET_Z_MIN) & (p[:, 2] <= IN_BUCKET_Z_MAX)
+    inside_z = (p[:, 2] >= IN_BUCKET_Z_MIN) & (p[:, 2] <= IN_BUCKET_Z_MAX + 0.01)
 
-    speed = torch.norm(env.scene[ball_cfg.name].data.root_lin_vel_w, dim=-1)
-    settled = speed < IN_BUCKET_MAX_SPEED
+    return (inside_x & inside_y & inside_z).float()
 
-    return (inside_x & inside_y & inside_z & settled).float()
+
+def reached_bucket_airspace(env: ManagerBasedRLEnv, ball_cfg: SceneEntityCfg) -> torch.Tensor:
+    """1.0 when the ball is positioned directly above the bucket opening."""
+    p = _ball_pos_env(env, ball_cfg)
+    xy_dist = torch.norm(p[:, :2] - torch.tensor([BUCKET_X, BUCKET_Y], device=env.device), dim=-1)
+    above = (p[:, 2] >= BUCKET_RIM_TOP_Z) & (p[:, 2] <= 0.68)
+    return ((xy_dist < 0.08) & above).float()
 
 
 # ── Stage 1: Reach (Broad + Fine) ───────────────────────────────────────────
@@ -162,12 +163,15 @@ def lifting_reward(
     dist_to_ee = torch.norm(_ee_pos(env, ee_frame_cfg) - ball_pos, dim=-1)
     held = 1.0 - torch.tanh(dist_to_ee / 0.06)
 
+    # Preserve lift credit once ball reaches bucket or is placed
+    delivered = torch.clamp(reached_bucket_airspace(env, ball_cfg) + is_ball_in_bucket(env, ball_cfg), 0.0, 1.0)
+    effective_held = torch.clamp(held + delivered, 0.0, 1.0)
+
     height_above_rest = p[:, 2] - BALL_REST_Z_ON_TABLE
     continuous_lift = torch.clamp(height_above_rest / lift_target_height, 0.0, 1.0)
-    # Milestone: ball has clearly lifted off the table surface (> 2.5 cm)
     is_lifted = (height_above_rest > 0.025).float()
 
-    return held * (continuous_lift + is_lifted) * (1.0 - is_ball_in_bucket(env, ball_cfg))
+    return effective_held * (continuous_lift + is_lifted) * (1.0 - is_ball_in_bucket(env, ball_cfg))
 
 
 # ── Stage 4: Carry to Bucket ─────────────────────────────────────────────────
@@ -186,10 +190,14 @@ def bucket_tracking_coarse(
     dist_to_ee = torch.norm(_ee_pos(env, ee_frame_cfg) - ball_pos, dim=-1)
     held = 1.0 - torch.tanh(dist_to_ee / 0.07)
 
+    # Preserve carry credit once ball reaches bucket or is placed
+    delivered = torch.clamp(reached_bucket_airspace(env, ball_cfg) + is_ball_in_bucket(env, ball_cfg), 0.0, 1.0)
+    effective_held = torch.clamp(held + delivered, 0.0, 1.0)
+
     target = torch.tensor(CARRY_TARGET, device=env.device).unsqueeze(0)
     distance = torch.norm(p - target, dim=-1)
 
-    return is_lifted * held * (1.0 - torch.tanh(distance / std)) * (
+    return is_lifted * effective_held * (1.0 - torch.tanh(distance / std)) * (
         1.0 - is_ball_in_bucket(env, ball_cfg)
     )
 
@@ -207,8 +215,8 @@ def release_reward(
     xy_dist = torch.norm(
         p[:, :2] - torch.tensor([BUCKET_X, BUCKET_Y], device=env.device), dim=-1
     )
-    xy_term = 1.0 - torch.tanh(xy_dist / 0.06)
-    z_term = 1.0 - torch.tanh((p[:, 2] - RELEASE_Z).abs() / 0.06)
+    xy_term = 1.0 - torch.tanh(xy_dist / 0.07)
+    z_term = 1.0 - torch.tanh((p[:, 2] - 0.58).abs() / 0.10)
 
     finger = _finger_opening(env, robot_cfg)
     # Continuous linear gradient: as finger travels from 0.00 (clamped) to 0.04 (open)

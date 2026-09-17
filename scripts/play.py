@@ -21,6 +21,7 @@ parser = argparse.ArgumentParser(description="Play Ball Pick-Place Franka Policy
 parser.add_argument("--task", type=str, default="BallPickPlace-Franka-Play-v0", help="Task name")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments for visualization (default 1)")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained checkpoint (.pt)")
+parser.add_argument("--max_steps", type=int, default=None, help="Max steps to simulate (default: infinite)")
 
 # In Isaac Lab 3.0 / Isaac Sim 6.0, AppLauncher defaults to headless unless --viz kit is passed.
 # For play.py, default to GUI display (--viz kit) unless explicitly overridden.
@@ -101,6 +102,10 @@ def main():
             step_count += 1
             if step_count % 100 == 0:
                 print(f"  Step {step_count:>6d} | reward: {rew.mean().item():.4f} | dones: {dones.sum().item():.0f}")
+
+            if args_cli.max_steps is not None and step_count >= args_cli.max_steps:
+                print(f"[INFO]: Reached max steps ({args_cli.max_steps}). Exiting simulation.")
+                break
 
             # Real-time pacing
             sleep_time = dt - (time.time() - start_time)

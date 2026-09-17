@@ -35,7 +35,9 @@ from isaaclab_physx.physics import PhysxCfg
 import isaaclab.envs.mdp as mdp
 from . import mdp as custom_mdp
 
-from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
+from isaaclab.controllers import DifferentialIKControllerCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 
 # Path to the hollow bucket USD model with 5 physical collision walls
 _BUCKET_USD_PATH = os.path.abspath(
@@ -81,7 +83,7 @@ class BallPickPlaceSceneCfg(InteractiveSceneCfg):
     )
 
     # 4. Robot (Franka Panda floor-mounted at 0, 0, 0 with High Home Pose Z=0.650m)
-    robot: ArticulationCfg = FRANKA_PANDA_CFG.replace(
+    robot: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -156,12 +158,14 @@ class BallPickPlaceSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class ActionsCfg:
-    """Action spaces for Franka: 7 arm joints + 1 binary gripper (open/close)."""
-    arm_action = mdp.JointPositionActionCfg(
+    """Cartesian Task-Space Actions for Franka: 3D Delta Position + 1 binary gripper."""
+    arm_action = DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
+        body_name="panda_hand",
+        controller=DifferentialIKControllerCfg(command_type="position", use_relative_mode=True, ik_method="dls"),
         scale=0.5,
-        use_default_offset=True,
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.1034]),
     )
     gripper_action = mdp.BinaryJointPositionActionCfg(
         asset_name="robot",
@@ -199,41 +203,39 @@ class RewardsCfg:
     """Staged, monotonically increasing reward pipeline matching IK behavior.
     
     Potential values step-by-step:
-      1. Reach:   0 -> 12 pts (Broad 8.0 + Fine 4.0)
-      2. Grasp:   0 -> 5 pts  (Finger clamp near ball)
-      3. Lift:    0 -> 15 pts (Ball raised above table)
+      1. Reach:   0 -> 9 pts  (Broad 6.0 + Fine 3.0)
+      2. Grasp:   0 -> 4 pts  (Finger clamp near ball)
+      3. Lift:    0 -> 10 pts (Ball raised above table)
       4. Transit: 0 -> 10 pts (Carry towards bucket)
-      5. Release: 0 -> 8 pts  (Open fingers above bucket)
-      6. Place:   30 pts      (Ball resting inside cavity)
+      5. Release: 0 -> 25 pts (Open fingers above bucket)
+      6. Place:   100 pts     (Ball inside cavity)
     """
     # ── Stage 1: Approach the ball (Broad + Fine)
-    reaching_coarse = RewTerm(func=custom_mdp.reaching_reward,      params={"std": 0.25}, weight=8.0)
-    reaching_fine   = RewTerm(func=custom_mdp.reaching_reward_fine, params={"std": 0.05}, weight=4.0)
+    reaching_coarse = RewTerm(func=custom_mdp.reaching_reward,      params={"std": 0.25}, weight=6.0)
+    reaching_fine   = RewTerm(func=custom_mdp.reaching_reward_fine, params={"std": 0.05}, weight=3.0)
 
     # ── Stage 2: Grasp the ball (Clamp fingers when at ball)
-    grasping        = RewTerm(func=custom_mdp.grasping_reward,                             weight=5.0)
+    grasping        = RewTerm(func=custom_mdp.grasping_reward,                             weight=4.0)
 
     # ── Stage 3: Lift the ball off table
-    lifting         = RewTerm(func=custom_mdp.lifting_reward,                              weight=15.0)
+    lifting         = RewTerm(func=custom_mdp.lifting_reward,                              weight=10.0)
 
     # ── Stage 4: Transit to bucket
     bucket_tracking = RewTerm(func=custom_mdp.bucket_tracking_coarse, params={"std": 0.25}, weight=10.0)
 
     # ── Stage 5: Release above bucket (Decisive incentive to open fingers)
-    release         = RewTerm(func=custom_mdp.release_reward,                              weight=15.0)
+    release         = RewTerm(func=custom_mdp.release_reward,                              weight=25.0)
 
-    # ── Stage 6: Place inside cavity (Dominant goal milestone: 65 > 48 holding)
-    placing         = RewTerm(func=custom_mdp.placing_reward,                              weight=65.0)
+    # ── Stage 6: Place inside cavity (Dominant goal milestone: 100 > 30 holding)
+    placing         = RewTerm(func=custom_mdp.placing_reward,                              weight=100.0)
 
     # ── Posture & Clearance
     ee_orientation  = RewTerm(func=custom_mdp.ee_downward_orientation_reward, weight=2.0)
     table_clearance = RewTerm(func=custom_mdp.arm_table_clearance_penalty,    weight=-5.0)
 
     # ── Regularization
-    ball_velocity = RewTerm(func=custom_mdp.ball_velocity_penalty, weight=-0.5)
+    ball_velocity = RewTerm(func=custom_mdp.ball_velocity_penalty, weight=-0.2)
     action_rate   = RewTerm(func=mdp.action_rate_l2,               weight=-1e-4)
-    joint_vel     = RewTerm(func=mdp.joint_vel_l2, weight=-1e-4,
-                            params={"asset_cfg": SceneEntityCfg("robot")})
 
 
 @configclass

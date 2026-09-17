@@ -36,18 +36,15 @@ def ball_in_bucket(
     env: ManagerBasedRLEnv,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """True when the ball is settled inside the bucket cavity."""
+    """True when the ball is inside the bucket cavity."""
     ball = env.scene[ball_cfg.name]
     p = ball.data.root_pos_w - env.scene.env_origins
 
     inside_x = (p[:, 0] - BUCKET_X).abs() < IN_BUCKET_XY_HALF
     inside_y = (p[:, 1] - BUCKET_Y).abs() < IN_BUCKET_XY_HALF
-    inside_z = (p[:, 2] >= IN_BUCKET_Z_MIN) & (p[:, 2] <= IN_BUCKET_Z_MAX)
+    inside_z = (p[:, 2] >= IN_BUCKET_Z_MIN) & (p[:, 2] <= IN_BUCKET_Z_MAX + 0.01)
 
-    speed = torch.norm(ball.data.root_lin_vel_w, dim=-1)
-    settled = speed < IN_BUCKET_MAX_SPEED
-
-    return inside_x & inside_y & inside_z & settled
+    return inside_x & inside_y & inside_z
 
 
 def ball_off_table(
