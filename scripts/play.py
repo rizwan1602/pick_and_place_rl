@@ -78,71 +78,26 @@ STANDBY_POS_W = [0.35, 0.00, 0.65]
 ball_entity_cfg = SceneEntityCfg("ball")
 
 
-class KinodynamicTrajectorySmoother:
-    """Industrial Kinodynamic Trajectory Filter & Continuous Velocity Blender.
+class ActionSmoother:
+    """Action Space Smoother: Eliminates 50 Hz micro-jitter while maintaining 100% full speed & torque.
     
-    Adheres to Franka Emika FCI (Franka Control Interface) & Boston Dynamics WBC principles:
-    1. Realistic Franka Dynamic Bandwidth: v_max = 1.20 m/s, a_max = 6.0 m/s^2.
-    2. Phase-Preserving Low-Pass Filter: alpha = 0.80 (cuts 50 Hz numerical float jitter without phase lag).
-    3. Continuous Velocity Blender: Preserves velocity across RL -> Release -> Settle -> Retract.
-    4. Soft Gripper Transition: Eliminates impulsive reaction torque at release.
+    Filters directly in the policy's action space [-1.0, 1.0] to prevent velocity choking,
+    preserving full motor authority so the Franka Panda moves at full industrial speed.
     """
 
-    def __init__(self, dt: float, v_max: float = 1.20, a_max: float = 6.0, alpha: float = 0.80, device: str = "cpu"):
-        self.dt = dt
-        self.v_max = v_max
-        self.a_max = a_max
+    def __init__(self, alpha: float = 0.70):
         self.alpha = alpha
-        self.device = device
-        self.curr_vel = torch.zeros(1, 3, device=device)
-        self.filtered_delta = None
-        self.curr_gripper = torch.tensor([[1.0]], device=device)
+        self.filtered_action = None
 
     def reset(self):
-        self.curr_vel.zero_()
-        self.filtered_delta = None
-        self.curr_gripper.fill_(1.0)
+        self.filtered_action = None
 
-    def filter_action(self, target_delta: torch.Tensor, scale: float = 0.5) -> torch.Tensor:
-        """Filters neural policy delta with low-latency jitter rejection + Franka acceleration limits."""
-        # 1. Low-latency filter to reject 50 Hz numerical float noise without adding phase lag
-        if self.filtered_delta is None:
-            self.filtered_delta = target_delta.clone()
+    def filter(self, raw_action: torch.Tensor) -> torch.Tensor:
+        if self.filtered_action is None:
+            self.filtered_action = raw_action.clone()
         else:
-            self.filtered_delta = self.alpha * target_delta + (1.0 - self.alpha) * self.filtered_delta
-
-        # 2. Convert desired displacement to desired velocity
-        des_vel = (self.filtered_delta * scale) / self.dt
-        vel_norm = torch.norm(des_vel, dim=-1, keepdim=True)
-        scale_down = torch.clamp(self.v_max / (vel_norm + 1e-6), max=1.0)
-        des_vel = des_vel * scale_down
-
-        # 3. Enforce Franka acceleration bounds (a_max = 6.0 m/s^2)
-        max_delta_v = self.a_max * self.dt
-        delta_v = des_vel - self.curr_vel
-        delta_v_clamped = torch.clamp(delta_v, -max_delta_v, max_delta_v)
-        self.curr_vel = self.curr_vel + delta_v_clamped
-
-        return (self.curr_vel * self.dt) / scale
-
-    def track_waypoint(self, current_pos: torch.Tensor, target_pos: torch.Tensor, gain: float = 3.5, scale: float = 0.5, v_limit: float = None) -> torch.Tensor:
-        """Smoothly blends and drives end-effector toward a Cartesian waypoint with continuous velocity."""
-        limit = v_limit if v_limit is not None else self.v_max
-        error = target_pos - current_pos
-        des_vel = torch.clamp(error * gain, -limit, limit)
-
-        # Bound acceleration smoothly
-        max_delta_v = self.a_max * self.dt
-        delta_v = des_vel - self.curr_vel
-        delta_v_clamped = torch.clamp(delta_v, -max_delta_v, max_delta_v)
-        self.curr_vel = self.curr_vel + delta_v_clamped
-
-        return (self.curr_vel * self.dt) / scale
-
-    def filter_gripper(self, target_gripper: torch.Tensor, rate: float = 0.25) -> torch.Tensor:
-        """Smoothly ramps gripper to eliminate reactive impulse shock on release."""
-        self.curr_gripper = self.curr_gripper + rate * (target_gripper - self.curr_gripper)
-        return self.curr_gripper
+            self.filtered_action = self.alpha * self.filtered_action + (1.0 - self.alpha) * raw_action
+        return self.filtered_action
 
 
 def main():
@@ -180,7 +135,7 @@ def main():
 
     dt = env.unwrapped.step_dt
     home_tensor = torch.tensor(STANDBY_POS_W, device=env.unwrapped.device).unsqueeze(0)
-    smoother = KinodynamicTrajectorySmoother(dt=dt, v_max=1.20, a_max=6.0, alpha=0.80, device=env.unwrapped.device)
+    smoother = ActionSmoother(alpha=0.65)
 
     # Create OpenCV HUD window if requested
     if args_cli.show_camera and not getattr(args_cli, "headless", False):
@@ -221,8 +176,8 @@ def main():
                 with torch.inference_mode():
                     raw_action = policy(obs)
 
-                # 2nd-order kinodynamic trajectory smoothing (limits velocity & acceleration, kills 50 Hz micro-jitter)
-                smooth_trans = smoother.filter_action(raw_action[:, :3])
+                # Filter directly in [-1, 1] action space: preserves 100% full speed & torque
+                smooth_trans = smoother.filter(raw_action[:, :3])
                 act = torch.zeros(1, 4, device=env.unwrapped.device)
                 act[:, :3] = smooth_trans
                 act[:, 3] = raw_action[:, 3]
@@ -259,20 +214,19 @@ def main():
 
             elif state == STATE_RELEASE:
                 # ── Vertical Release & Continuous Lift ────────────────────────
-                # Seamless velocity blending: ascend vertically to 0.62m over bucket center
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
                 target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device).unsqueeze(0)
+                delta = target_pose - ee_pos
 
-                release_trans = smoother.track_waypoint(ee_pos, target_pose, gain=3.0, v_limit=0.35)
                 release_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                release_act[:, :3] = release_trans
+                release_act[:, :3] = torch.clamp(delta * 2.5, -0.6, 0.6)
                 release_act[:, 3] = 1.0  # Open fingers fully
 
                 obs, rew, dones, extras = env.step(release_act)
                 release_step += 1
 
                 # Fingertips cleared bucket rim & fingers open
-                if ee_pos[0, 2].item() >= 0.56 and release_step >= 10:
+                if ee_pos[0, 2].item() >= 0.58 and release_step >= 12:
                     state = STATE_SETTLE
                     settle_step = 0
                     consecutive_settled = 0
@@ -281,10 +235,10 @@ def main():
                 # ── Settle Confirmation ──────────────────────────────────────
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
                 target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device).unsqueeze(0)
+                delta = target_pose - ee_pos
 
-                hover_trans = smoother.track_waypoint(ee_pos, target_pose, gain=2.5, v_limit=0.15)
                 hover_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                hover_act[:, :3] = hover_trans
+                hover_act[:, :3] = torch.clamp(delta * 2.0, -0.2, 0.2)
                 hover_act[:, 3] = 1.0
 
                 obs, rew, dones, extras = env.step(hover_act)
@@ -321,22 +275,20 @@ def main():
                     retract_step = 0
 
             elif state == STATE_RETRACT:
-                # ── Continuous Smooth Retract to Standby Home Pose ──────────
+                # ── Smooth Retract to Standby Home Pose ──────────────────────
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
                 delta = home_tensor - ee_pos
                 dist_to_home = torch.norm(delta).item()
 
-                retract_trans = smoother.track_waypoint(ee_pos, home_tensor, gain=2.5, v_limit=0.45)
                 retract_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                retract_act[:, :3] = retract_trans
+                retract_act[:, :3] = torch.clamp(delta * 2.5, -0.8, 0.8)
                 retract_act[:, 3] = 1.0  # Keep fingers open
 
                 obs, rew, dones, extras = env.step(retract_act)
                 retract_step += 1
 
-                # Reset immediately when near Home (< 50mm) or after 35 steps
-                arm_speed = torch.norm(smoother.curr_vel).item()
-                if (dist_to_home < 0.050 and arm_speed < 0.20) or retract_step >= 35:
+                # Reset immediately when near Home (< 40mm) or after 35 steps
+                if dist_to_home < 0.040 or retract_step >= 35:
                     print(f" -> Reached Home Standby pose ({dist_to_home*1000:.1f}mm). Resetting for next cycle...\n", flush=True)
 
                     if args_cli.num_cycles and cycle_count >= args_cli.num_cycles:
