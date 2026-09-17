@@ -194,30 +194,27 @@ def bucket_tracking_coarse(
     )
 
 
-# ── Stage 5: Release ─────────────────────────────────────────────────────────
+# ── Stage 5: Release (Smooth opening gradient over bucket) ───────────────────
 
 def release_reward(
     env: ManagerBasedRLEnv,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward opening the fingers inside the drop corridor."""
+    """Reward opening the fingers inside the drop corridor with smooth continuous gradient."""
     p = _ball_pos_env(env, ball_cfg)
 
     xy_dist = torch.norm(
         p[:, :2] - torch.tensor([BUCKET_X, BUCKET_Y], device=env.device), dim=-1
     )
-    xy_term = 1.0 - torch.tanh(xy_dist / RELEASE_XY_TOL)
-    z_term = 1.0 - torch.tanh((p[:, 2] - RELEASE_Z).abs() / 0.04)
+    xy_term = 1.0 - torch.tanh(xy_dist / 0.06)
+    z_term = 1.0 - torch.tanh((p[:, 2] - RELEASE_Z).abs() / 0.06)
 
     finger = _finger_opening(env, robot_cfg)
-    openness = torch.clamp(
-        (finger - FINGER_RELEASE_THRESHOLD) / (0.040 - FINGER_RELEASE_THRESHOLD),
-        0.0,
-        1.0,
-    )
+    # Continuous linear gradient: as finger travels from 0.00 (clamped) to 0.04 (open)
+    openness = torch.clamp(finger / 0.04, 0.0, 1.0)
 
-    return xy_term * z_term * openness
+    return xy_term * z_term * openness * (1.0 - is_ball_in_bucket(env, ball_cfg))
 
 
 # ── Stage 6: Place ───────────────────────────────────────────────────────────

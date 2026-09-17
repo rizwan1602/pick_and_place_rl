@@ -19,7 +19,7 @@ class BallPickPlacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     num_steps_per_env = 48
     max_iterations = 3000
-    save_interval = 500
+    save_interval = 100
     experiment_name = "ball_pick_place_franka"
     run_name = ""
     logger = "tensorboard"

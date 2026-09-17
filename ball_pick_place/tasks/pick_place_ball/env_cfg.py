@@ -219,11 +219,11 @@ class RewardsCfg:
     # ── Stage 4: Transit to bucket
     bucket_tracking = RewTerm(func=custom_mdp.bucket_tracking_coarse, params={"std": 0.25}, weight=10.0)
 
-    # ── Stage 5: Release above bucket
-    release         = RewTerm(func=custom_mdp.release_reward,                              weight=8.0)
+    # ── Stage 5: Release above bucket (Decisive incentive to open fingers)
+    release         = RewTerm(func=custom_mdp.release_reward,                              weight=15.0)
 
-    # ── Stage 6: Place inside cavity (Dominant goal milestone)
-    placing         = RewTerm(func=custom_mdp.placing_reward,                              weight=30.0)
+    # ── Stage 6: Place inside cavity (Dominant goal milestone: 65 > 48 holding)
+    placing         = RewTerm(func=custom_mdp.placing_reward,                              weight=65.0)
 
     # ── Posture & Clearance
     ee_orientation  = RewTerm(func=custom_mdp.ee_downward_orientation_reward, weight=2.0)
