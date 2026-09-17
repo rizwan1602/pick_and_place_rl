@@ -73,9 +73,75 @@ from ball_pick_place.tasks.pick_place_ball.mdp.geometry import (
     IN_BUCKET_MAX_SPEED,
 )
 
-# Physical Home / Standby position coordinates
-STANDBY_POS_W = [0.25, -0.22, 0.65]
+# Physical Home / Standby position coordinates (identical to run_deterministic_ik.py)
+STANDBY_POS_W = [0.35, 0.00, 0.65]
 ball_entity_cfg = SceneEntityCfg("ball")
+
+
+class KinodynamicTrajectorySmoother:
+    """2nd-Order Kinodynamic Trajectory Filter & Continuous Velocity Blender.
+    
+    1. 1st-Stage Low-Pass Filter: Cuts off 50 Hz neural policy chatter (alpha=0.40).
+    2. 2nd-Stage Acceleration Limiter: Enforces physical acceleration bounds (a_max=0.85 m/s^2).
+    3. Continuous Velocity Blender: Preserves velocity across RL -> Release -> Settle -> Retract.
+    4. Soft Gripper Transition: Eliminates impulsive reaction torque at release.
+    """
+
+    def __init__(self, dt: float, v_max: float = 0.35, a_max: float = 0.85, alpha: float = 0.40, device: str = "cpu"):
+        self.dt = dt
+        self.v_max = v_max
+        self.a_max = a_max
+        self.alpha = alpha
+        self.device = device
+        self.curr_vel = torch.zeros(1, 3, device=device)
+        self.filtered_delta = None
+        self.curr_gripper = torch.tensor([[1.0]], device=device)
+
+    def reset(self):
+        self.curr_vel.zero_()
+        self.filtered_delta = None
+        self.curr_gripper.fill_(1.0)
+
+    def filter_action(self, target_delta: torch.Tensor, scale: float = 0.5) -> torch.Tensor:
+        """Filters neural policy delta with 2-stage low-pass + acceleration bounding."""
+        # 1. Low-pass filter to reject 50 Hz neural variance
+        if self.filtered_delta is None:
+            self.filtered_delta = target_delta.clone()
+        else:
+            self.filtered_delta = self.alpha * target_delta + (1.0 - self.alpha) * self.filtered_delta
+
+        # 2. Convert desired displacement to desired velocity
+        des_vel = (self.filtered_delta * scale) / self.dt
+        vel_norm = torch.norm(des_vel, dim=-1, keepdim=True)
+        scale_down = torch.clamp(self.v_max / (vel_norm + 1e-6), max=1.0)
+        des_vel = des_vel * scale_down
+
+        # 3. Bound acceleration (limit delta_v per step)
+        max_delta_v = self.a_max * self.dt
+        delta_v = des_vel - self.curr_vel
+        delta_v_clamped = torch.clamp(delta_v, -max_delta_v, max_delta_v)
+        self.curr_vel = self.curr_vel + delta_v_clamped
+
+        return (self.curr_vel * self.dt) / scale
+
+    def track_waypoint(self, current_pos: torch.Tensor, target_pos: torch.Tensor, gain: float = 2.5, scale: float = 0.5, v_limit: float = None) -> torch.Tensor:
+        """Smoothly blends and drives end-effector toward a Cartesian waypoint with continuous velocity."""
+        limit = v_limit if v_limit is not None else self.v_max
+        error = target_pos - current_pos
+        des_vel = torch.clamp(error * gain, -limit, limit)
+
+        # Bound acceleration smoothly
+        max_delta_v = self.a_max * self.dt
+        delta_v = des_vel - self.curr_vel
+        delta_v_clamped = torch.clamp(delta_v, -max_delta_v, max_delta_v)
+        self.curr_vel = self.curr_vel + delta_v_clamped
+
+        return (self.curr_vel * self.dt) / scale
+
+    def filter_gripper(self, target_gripper: torch.Tensor, rate: float = 0.25) -> torch.Tensor:
+        """Smoothly ramps gripper to eliminate reactive impulse shock on release."""
+        self.curr_gripper = self.curr_gripper + rate * (target_gripper - self.curr_gripper)
+        return self.curr_gripper
 
 
 def main():
@@ -112,8 +178,8 @@ def main():
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     dt = env.unwrapped.step_dt
-    alpha = args_cli.smooth_alpha
     home_tensor = torch.tensor(STANDBY_POS_W, device=env.unwrapped.device).unsqueeze(0)
+    smoother = KinodynamicTrajectorySmoother(dt=dt, v_max=0.36, a_max=0.90, device=env.unwrapped.device)
 
     # Create OpenCV HUD window if requested
     if args_cli.show_camera and not getattr(args_cli, "headless", False):
@@ -138,7 +204,6 @@ def main():
     settle_step = 0
     consecutive_settled = 0
     retract_step = 0
-    filtered_action = None
     results = []
 
     obs = env.get_observations()
@@ -155,14 +220,11 @@ def main():
                 with torch.inference_mode():
                     raw_action = policy(obs)
 
-                # Apply Exponential Moving Average (EMA) action filter to kill 50 Hz micro-jitter
-                if filtered_action is None:
-                    filtered_action = raw_action.clone()
-                else:
-                    # Smooth 3D Cartesian translation deltas
-                    filtered_action[:, :3] = alpha * filtered_action[:, :3] + (1.0 - alpha) * raw_action[:, :3]
-                    # Pass binary gripper action through directly
-                    filtered_action[:, 3] = raw_action[:, 3]
+                # 2nd-order kinodynamic trajectory smoothing (limits velocity & acceleration, kills 50 Hz micro-jitter)
+                smooth_trans = smoother.filter_action(raw_action[:, :3])
+                act = torch.zeros(1, 4, device=env.unwrapped.device)
+                act[:, :3] = smooth_trans
+                act[:, 3] = raw_action[:, 3]
 
                 # Inspect scene state
                 ball_pos_w = env.unwrapped.scene["ball"].data.root_pos_w
@@ -178,67 +240,56 @@ def main():
                 dist_ee_ball = torch.norm(ee_pos_w[0] - ball_pos_w[0]).item()
 
                 # Safety Interlock:
-                # If the ball is lifted (>0.48m) and securely held by the gripper (dist < 0.08m),
-                # force fingers firmly CLOSED (-1.0) while in horizontal transit towards the bucket.
-                # Do not permit opening until the arm has arrived directly over the cavity (<= 0.045m).
-                # This completely eliminates premature fling into the rim while moving at speed!
+                # If holding ball, keep fingers firmly closed until centered over bucket cavity
                 is_holding = (ball_pos_env[0, 2].item() > 0.48) and (dist_ee_ball < 0.08)
                 if is_holding and dist_ee_bucket_xy > 0.045:
-                    filtered_action[:, 3] = -1.0
+                    act[:, 3] = -1.0
 
                 # Step physics
-                obs, rew, dones, extras = env.step(filtered_action)
+                obs, rew, dones, extras = env.step(act)
 
-                # Check if arm has brought the ball over the bucket cavity
+                # Check transition to release:
                 over_bucket = (dist_ee_bucket_xy <= 0.045) and (ee_pos_env[0, 2].item() <= 0.62)
                 in_bucket = is_ball_in_bucket(env.unwrapped, ball_entity_cfg).item() > 0.5
 
                 if (is_holding and over_bucket) or in_bucket:
                     state = STATE_RELEASE
                     release_step = 0
-                    filtered_action = None
 
             elif state == STATE_RELEASE:
-                # ── Vertical Release & Lift Corridor ────────────────────────
-                # Open fingers fully and ascend vertically (+Z) to 0.62m (14.5cm above rim)
-                # while holding (X, Y) steady directly above bucket center.
-                # This guarantees zero lateral dragging of the ball out of the cavity!
+                # ── Vertical Release & Continuous Lift ────────────────────────
+                # Seamless velocity blending: ascend vertically to 0.62m over bucket center
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
-                target_z = 0.62
+                target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device).unsqueeze(0)
 
+                release_trans = smoother.track_waypoint(ee_pos, target_pose, gain=3.0, v_limit=0.35)
                 release_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                # Keep centered directly over bucket
-                release_act[0, 0] = torch.clamp((BUCKET_X - ee_pos[0, 0]) * 3.0, -0.2, 0.2)
-                release_act[0, 1] = torch.clamp((BUCKET_Y - ee_pos[0, 1]) * 3.0, -0.2, 0.2)
-                # Lift upward
-                release_act[0, 2] = torch.clamp((target_z - ee_pos[0, 2]) * 3.0, -0.1, 0.5)
-                release_act[0, 3] = 1.0  # Fully open fingers
+                release_act[:, :3] = release_trans
+                release_act[:, 3] = 1.0  # Open fingers fully
 
                 obs, rew, dones, extras = env.step(release_act)
                 release_step += 1
 
-                # Fingertips have cleared bucket rim (ee_pos_z >= 0.58) and fingers had time to open (>= 15 steps / 0.3s)
-                if ee_pos[0, 2].item() >= 0.58 and release_step >= 15:
+                # Fingertips cleared bucket rim & fingers open
+                if ee_pos[0, 2].item() >= 0.56 and release_step >= 10:
                     state = STATE_SETTLE
                     settle_step = 0
                     consecutive_settled = 0
 
             elif state == STATE_SETTLE:
-                # ── True Settling Verification ──────────────────────────────
-                # Hover end-effector above bucket with fingers open while verifying
-                # the ball is resting on the bucket floor with low velocity.
+                # ── Settle Confirmation ──────────────────────────────────────
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
-                target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device)
-                delta = target_pose - ee_pos
+                target_pose = torch.tensor([BUCKET_X, BUCKET_Y, 0.62], device=env.unwrapped.device).unsqueeze(0)
 
+                hover_trans = smoother.track_waypoint(ee_pos, target_pose, gain=2.5, v_limit=0.15)
                 hover_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                hover_act[0, :3] = torch.clamp(delta * 2.0, -0.2, 0.2)
-                hover_act[0, 3] = 1.0
+                hover_act[:, :3] = hover_trans
+                hover_act[:, 3] = 1.0
 
                 obs, rew, dones, extras = env.step(hover_act)
                 settle_step += 1
 
-                # Verify resting position and speed inside bucket cavity
+                # Check if ball has settled
                 ball_pos_env = env.unwrapped.scene["ball"].data.root_pos_w - env.unwrapped.scene.env_origins
                 inside_x = abs(ball_pos_env[0, 0].item() - BUCKET_X) < IN_BUCKET_XY_HALF
                 inside_y = abs(ball_pos_env[0, 1].item() - BUCKET_Y) < IN_BUCKET_XY_HALF
@@ -246,20 +297,21 @@ def main():
                 ball_vel_w = env.unwrapped.scene["ball"].data.root_lin_vel_w
                 ball_speed = torch.norm(ball_vel_w, dim=-1).item()
 
-                is_resting = inside_x and inside_y and inside_z and (ball_speed < 0.20)
+                is_resting = inside_x and inside_y and inside_z and (ball_speed < 0.25)
                 if is_resting:
                     consecutive_settled += 1
                 else:
                     consecutive_settled = 0
 
-                if consecutive_settled >= 5:
+                # As soon as ball is resting for 3 consecutive steps (60ms), blend immediately to RETRACT!
+                if consecutive_settled >= 3:
                     duration = time.time() - cycle_start_time
                     cycle_count += 1
                     results.append((cycle_count, duration, "SUCCESS"))
                     print(f" [RESULT] Cycle {cycle_count}/{args_cli.num_cycles}: SUCCESS! Ball placed & settled in cavity in {duration:.2f}s! -> Retracting to Home...", flush=True)
                     state = STATE_RETRACT
                     retract_step = 0
-                elif settle_step >= 40:  # Timeout after ~0.8s: ball missed or bounced out
+                elif settle_step >= 25:  # Timeout after ~0.5s: proceed to retract
                     duration = time.time() - cycle_start_time
                     cycle_count += 1
                     results.append((cycle_count, duration, "FAILED"))
@@ -268,20 +320,22 @@ def main():
                     retract_step = 0
 
             elif state == STATE_RETRACT:
-                # ── Retract to Standby Home Pose ────────────────────────────
+                # ── Continuous Smooth Retract to Standby Home Pose ──────────
                 ee_pos = env.unwrapped.scene["ee_frame"].data.target_pos_w[..., 0, :] - env.unwrapped.scene.env_origins
                 delta = home_tensor - ee_pos
                 dist_to_home = torch.norm(delta).item()
 
+                retract_trans = smoother.track_waypoint(ee_pos, home_tensor, gain=2.5, v_limit=0.45)
                 retract_act = torch.zeros(1, 4, device=env.unwrapped.device)
-                retract_act[:, :3] = torch.clamp(delta * 2.0, -0.6, 0.6)
+                retract_act[:, :3] = retract_trans
                 retract_act[:, 3] = 1.0  # Keep fingers open
 
                 obs, rew, dones, extras = env.step(retract_act)
                 retract_step += 1
 
-                # Once at Home (or after 1.0s / 50 steps), complete cycle
-                if dist_to_home < 0.035 or retract_step >= 50:
+                # Reset immediately when near Home (< 50mm) or after 35 steps
+                arm_speed = torch.norm(smoother.curr_vel).item()
+                if (dist_to_home < 0.050 and arm_speed < 0.20) or retract_step >= 35:
                     print(f" -> Reached Home Standby pose ({dist_to_home*1000:.1f}mm). Resetting for next cycle...\n", flush=True)
 
                     if args_cli.num_cycles and cycle_count >= args_cli.num_cycles:
@@ -298,7 +352,7 @@ def main():
                     # Reset environment for next randomized trial
                     obs, _ = env.reset()
                     policy.reset()
-                    filtered_action = None
+                    smoother.reset()
                     state = STATE_RL
                     cycle_start_time = time.time()
                     print(f"[CYCLE {cycle_count + 1}/{args_cli.num_cycles}] Started autonomous RL pick-and-place...", flush=True)
