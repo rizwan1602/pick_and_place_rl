@@ -312,16 +312,6 @@ class BallPickPlaceFrankaEnvCfg(ManagerBasedRLEnvCfg):
 
 
 @configclass
-class BallPickPlaceFrankaEnvCfg_PLAY(BallPickPlaceFrankaEnvCfg):
-    """Evaluation / Play variant with 1 robot and close-up visualization."""
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.num_envs = 1
-        self.scene.env_spacing = 2.5
-        self.observations.policy.enable_corruption = False
-
-
-@configclass
 class BallPickPlaceCameraSceneCfg(BallPickPlaceSceneCfg):
     """Scene configuration equipped with Overhead 3D RGB-D Camera for Vision-Guided RL/IK."""
     overhead_cam: CameraCfg = CameraCfg(
@@ -348,3 +338,13 @@ class BallPickPlaceCameraSceneCfg(BallPickPlaceSceneCfg):
 class BallPickPlaceFrankaCameraEnvCfg(BallPickPlaceFrankaEnvCfg):
     """Camera-enabled RL / Vision evaluation environment."""
     scene: BallPickPlaceCameraSceneCfg = BallPickPlaceCameraSceneCfg(num_envs=1, env_spacing=2.5)
+
+
+@configclass
+class BallPickPlaceFrankaEnvCfg_PLAY(BallPickPlaceFrankaCameraEnvCfg):
+    """Evaluation / Play variant equipped with camera and close-up visualization."""
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
