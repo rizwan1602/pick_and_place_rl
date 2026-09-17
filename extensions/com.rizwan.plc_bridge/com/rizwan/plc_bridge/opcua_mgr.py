@@ -24,7 +24,7 @@ class PLCManager:
     def __init__(self):
         self.endpoint: str = "opc.tcp://192.168.0.1:4840"
         self.db_name: str = "Data_block_1"
-        self.tag_name: str = "test"
+        self.tag_name: str = "start"
         self.db_number: int = 1
         self.byte_offset: int = 0
         self.bit_offset: int = 0
