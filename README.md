@@ -46,7 +46,7 @@ The arm picks the ball, lifts it, carries it to the container, drops it cleanly,
 
 ![Pick and place demo](docs/videos/ppoc.gif)
 
-[📹 Watch full video (1080p)](docs/videos/ppoc.mp4)
+[📹 Watch full video](docs/videos/01_smooth_pick_and_place.mp4)
 
 </div>
 
@@ -58,7 +58,7 @@ The Omniverse extension connects to the PLC over OPC UA. **START** writes bit `1
 
 ![PLC integration demo](docs/videos/final_video.gif)
 
-[📹 Watch full video (1080p)](docs/videos/final_video.mp4)
+[📹 Watch full video](docs/videos/02_siemens_plc_integration.mp4)
 
 </div>
 
@@ -70,7 +70,7 @@ Mid-cycle, the ball gets teleported to a random spot on the table. The vision pi
 
 ![Ball randomization demo](docs/videos/live_random_pos.gif)
 
-[📹 Watch full video (1080p)](docs/videos/live_random_pos.mp4)
+[📹 Watch full video](docs/videos/03_realtime_ball_randomization.mp4)
 
 </div>
 
@@ -208,17 +208,21 @@ NVIDIA Isaac Sim / PhysX 5 GPU
 ├── ball_pick_place/                # Isaac Lab RL environment
 │   ├── agents/
 │   │   └── rsl_rl_ppo_cfg.py      # PPO hyperparameters
-│   └── tasks/pick_place_ball/
-│       ├── env_cfg.py              # Scene and environment config
-│       └── mdp/
-│           ├── geometry.py         # Workcell coordinates
-│           ├── rewards.py          # Reward shaping
-│           ├── observations.py     # 41-dim observation builder
-│           ├── terminations.py     # Success/failure conditions
-│           └── events.py           # Domain randomization
+│   ├── tasks/pick_place_ball/
+│   │   ├── env_cfg.py              # Scene and environment config
+│   │   └── mdp/
+│   │       ├── geometry.py         # Workcell coordinates
+│   │       ├── rewards.py          # Reward shaping
+│   │       ├── observations.py     # 41-dim observation builder
+│   │       ├── terminations.py     # Success/failure conditions
+│   │       └── events.py           # Domain randomization
+│   └── utils/
+│       ├── filters.py              # ActionSmoother (EMA filter)
+│       └── hud.py                  # CellCameraHUD (OpenCV GUI & controls)
 │
 ├── extensions/
 │   └── com.rizwan.siemens_plc/     # Omniverse Kit extension
+│       ├── extension.toml          # Extension manifest
 │       └── siemens_plc/
 │           ├── extension.py        # Lifecycle management
 │           ├── bridge_state.py     # Thread-safe robot cell bridge
