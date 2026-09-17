@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 '''
 OPC UA Manager for Siemens S7 PLC communication in Omniverse / Isaac Sim.
 Connects via asyncua, monitors DB tags, and synchronizes with Franka Pick & Place cell.

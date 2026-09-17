@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 '''
 Shared State Bridge between Siemens PLC Extension UI, OPC UA Manager, and Franka Pick-Place Policy.
 '''

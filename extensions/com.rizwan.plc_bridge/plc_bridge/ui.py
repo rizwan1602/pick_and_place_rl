@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 UI Window for Siemens PLC OPC UA Bridge in Isaac Sim / Omniverse.
-Industrial High-Contrast Panel with START / STOP / RESET and Ball Controls.
+Industrial High-Contrast Panel with unified START / STOP / RESET and Ball Controls.
+Directly writes 1/0 bits to Siemens S7 PLC and synchronizes with Franka robot.
 Automatically docks into the bottom-right Property panel.
 """
 
@@ -23,7 +24,7 @@ class PLCBridgeUI:
         self.window = ui.Window(
             "Siemens PLC OPC UA Bridge",
             width=350,
-            height=400,
+            height=380,
             dock_preference=ui.DockPreference.RIGHT_BOTTOM,
         )
 
@@ -167,6 +168,7 @@ class PLCBridgeUI:
                             )
 
                     # ── Card 2: 3 Big Industrial Control Buttons ─────────────
+                    # START writes 1 (TRUE) to PLC; STOP writes 0 (FALSE); RESET writes 0 & homes
                     with ui.HStack(height=50, spacing=6):
                         self.btn_start = ui.Button(
                             "START",
@@ -185,7 +187,7 @@ class PLCBridgeUI:
                         )
 
                     ui.Label(
-                        "RESET resets all: Returns Arm to Home and places ball on table.",
+                        "START sends 1 to PLC | STOP sends 0 to PLC | RESET homes arm & respawns ball",
                         style={"font_size": 10, "color": 0xFFAAAAAA},
                     )
 
@@ -204,7 +206,7 @@ class PLCBridgeUI:
 
                     ui.Line(style={"color": 0x22FFFFFF})
 
-                    # ── Card 4: Siemens S7 OPC UA Connection (Compact) ───────
+                    # ── Card 4: Siemens S7 OPC UA Settings (Single Unified Place) ─
                     with ui.CollapsableFrame("Siemens S7 OPC UA Settings", collapsed=True):
                         with ui.VStack(spacing=5, style={"margin": 4}):
                             with ui.HStack():
@@ -243,18 +245,6 @@ class PLCBridgeUI:
                                     style={"background_color": 0xFFDC2626, "font_size": 10},
                                 )
 
-                            with ui.HStack(height=26, spacing=4):
-                                ui.Button(
-                                    "Write Bit TRUE (1)",
-                                    clicked_fn=lambda: asyncio.ensure_future(self.manager.write_toggle_bit(True)),
-                                    style={"background_color": 0xFF047857, "font_size": 9},
-                                )
-                                ui.Button(
-                                    "Write Bit FALSE (0)",
-                                    clicked_fn=lambda: asyncio.ensure_future(self.manager.write_toggle_bit(False)),
-                                    style={"background_color": 0xFF991B1B, "font_size": 9},
-                                )
-
     def _update_node_display(self, model=None):
         if self.db_name_field:
             self.manager.db_name = self.db_name_field.model.get_value_as_string()
@@ -264,18 +254,42 @@ class PLCBridgeUI:
             self.effective_node_label.text = self.manager.get_effective_node_id()
 
     def _on_start_clicked(self):
-        """User clicked START button in UI."""
-        print("[PLC Bridge UI] START button clicked!")
+        """User clicked START: Writes 1 (TRUE) to Siemens PLC and starts pick & place."""
+        print("[PLC Bridge UI] START clicked: Sending TRUE (1) to Siemens PLC and starting Robot...")
+        self._update_node_display()
+        asyncio.ensure_future(self._handle_start_action())
+
+    async def _handle_start_action(self):
+        url = self.endpoint_field.model.get_value_as_string() if self.endpoint_field else self.manager.endpoint
+        if not self.manager.is_connected:
+            try:
+                await self.manager.connect(url)
+            except Exception:
+                pass
+        if self.manager.is_connected:
+            await self.manager.write_toggle_bit(True)
         self.bridge.trigger_start()
 
     def _on_stop_clicked(self):
-        """User clicked STOP button in UI."""
-        print("[PLC Bridge UI] STOP button clicked!")
+        """User clicked STOP: Writes 0 (FALSE) to Siemens PLC and halts robot."""
+        print("[PLC Bridge UI] STOP clicked: Sending FALSE (0) to Siemens PLC and halting Robot...")
+        self._update_node_display()
+        asyncio.ensure_future(self._handle_stop_action())
+
+    async def _handle_stop_action(self):
+        if self.manager.is_connected:
+            await self.manager.write_toggle_bit(False)
         self.bridge.trigger_stop()
 
     def _on_reset_clicked(self):
-        """User clicked RESET button in UI."""
-        print("[PLC Bridge UI] RESET button clicked -> Homing arm and resetting ball to table!")
+        """User clicked RESET: Writes 0 (FALSE) to Siemens PLC and fully resets cell."""
+        print("[PLC Bridge UI] RESET clicked: Sending 0 to PLC, homing robot, and resetting ball...")
+        self._update_node_display()
+        asyncio.ensure_future(self._handle_reset_action())
+
+    async def _handle_reset_action(self):
+        if self.manager.is_connected:
+            await self.manager.write_toggle_bit(False)
         self.bridge.trigger_reset()
 
     def _on_spawn_ball_clicked(self):
