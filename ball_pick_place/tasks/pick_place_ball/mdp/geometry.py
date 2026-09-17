@@ -18,7 +18,14 @@ Bucket prim is placed at (0.35, 0.30, 0.42) in env-local coordinates.
 from __future__ import annotations
 
 # ── Table ────────────────────────────────────────────────────────────────────
+TABLE_SIZE: tuple[float, float, float] = (0.50, 0.50, 0.42)
+TABLE_POS: tuple[float, float, float] = (0.40, 0.0, 0.21)
 TABLE_TOP_Z: float = 0.42
+TABLE_COLLISION_Z: float = 0.425  # End-effector penetration below this causes table collision
+
+# ── Hand Control Heights (Validated in Stage 1) ──────────────────────────────
+HAND_GRASP_Z: float = 0.545  # Leaves 8mm fingertip clearance above table
+HAND_HOVER_Z: float = 0.650  # Safe transport and high home altitude (>14cm clearance)
 
 # ── Ball ─────────────────────────────────────────────────────────────────────
 BALL_RADIUS: float = 0.03

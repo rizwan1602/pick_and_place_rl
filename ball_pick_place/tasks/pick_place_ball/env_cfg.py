@@ -26,7 +26,7 @@ from isaaclab.managers import (
     TerminationTermCfg as DoneTerm,
 )
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.sensors import CameraCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer import OffsetCfg
 from isaaclab.utils.configclass import configclass
 
@@ -63,11 +63,11 @@ class BallPickPlaceSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(1.0, 1.0, 1.0)),
     )
 
-    # 3. Table (0.60m x 0.50m x 0.42m at center (0.35, 0.0, 0.21))
+    # 3. Table (0.50m x 0.50m x 0.42m at center (0.40, 0.0, 0.21) - 3cm clearance from base)
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.CuboidCfg(
-            size=(0.60, 0.50, 0.42),
+            size=(0.50, 0.50, 0.42),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.55, 0.45)),
@@ -77,22 +77,22 @@ class BallPickPlaceSceneCfg(InteractiveSceneCfg):
                 friction_combine_mode="max",
             ),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.35, 0.0, 0.21)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.40, 0.0, 0.21)),
     )
 
-    # 4. Robot (Franka Panda floor-mounted at 0, 0, 0, gravity enabled)
+    # 4. Robot (Franka Panda floor-mounted at 0, 0, 0 with High Home Pose Z=0.650m)
     robot: ArticulationCfg = FRANKA_PANDA_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
             joint_pos={
-                "panda_joint1": 0.0,
-                "panda_joint2": -0.569,
-                "panda_joint3": 0.0,
-                "panda_joint4": -2.810,
-                "panda_joint5": 0.0,
-                "panda_joint6": 3.037,
-                "panda_joint7": 0.741,
+                "panda_joint1": -0.0260,
+                "panda_joint2": -0.6079,
+                "panda_joint3": 0.0171,
+                "panda_joint4": -2.0867,
+                "panda_joint5": 0.0098,
+                "panda_joint6": 1.4793,
+                "panda_joint7": 0.7742,
                 "panda_finger_joint.*": 0.04,
             },
         ),
@@ -243,8 +243,8 @@ class EventCfg:
         mode="reset",
         params={
             "ball_cfg": SceneEntityCfg("ball"),
-            "table_x_range": (0.20, 0.45),
-            "table_y_range": (-0.18, 0.18),
+            "table_x_range": (0.28, 0.42),
+            "table_y_range": (-0.12, 0.12),
             "start_fraction": 0.6,      # 60% of resets begin with ball placed
             "anneal_steps": 38_400,     # Exactly 800 iterations (800 iters x 48 steps)
         },
@@ -307,3 +307,32 @@ class BallPickPlaceFrankaEnvCfg_PLAY(BallPickPlaceFrankaEnvCfg):
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
+
+
+@configclass
+class BallPickPlaceCameraSceneCfg(BallPickPlaceSceneCfg):
+    """Scene configuration equipped with Overhead 3D RGB-D Camera for Vision-Guided RL/IK."""
+    overhead_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/OverheadCam",
+        update_period=0.0,
+        height=480,
+        width=640,
+        data_types=["rgb", "distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 5.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.40, 0.0, 1.20),
+            rot=(0.0, 0.7071068, 0.0, 0.7071068),
+            convention="world",
+        ),
+    )
+
+
+@configclass
+class BallPickPlaceFrankaCameraEnvCfg(BallPickPlaceFrankaEnvCfg):
+    """Camera-enabled RL / Vision evaluation environment."""
+    scene: BallPickPlaceCameraSceneCfg = BallPickPlaceCameraSceneCfg(num_envs=1, env_spacing=2.5)
