@@ -170,29 +170,29 @@ def main():
 
     env = RslRlVecEnvWrapper(env)
 
-    # ── Automatically Load & Enable Siemens PLC Bridge Extension ─────────────
+    # ── Automatically Load & Enable Siemens PLC Extension ────────────────────
     cell_bridge = None
     try:
         import omni.kit.app
         ext_mgr = omni.kit.app.get_app().get_extension_manager()
         ext_folder = os.path.abspath("extensions")
         ext_mgr.add_path(ext_folder)
-        if not ext_mgr.is_extension_enabled("com.rizwan.plc_bridge"):
-            ext_mgr.set_extension_enabled_immediate("com.rizwan.plc_bridge", True)
-        print("[PLC] Siemens PLC Bridge Extension (com.rizwan.plc_bridge) loaded successfully!")
+        if not ext_mgr.is_extension_enabled("com.rizwan.siemens_plc"):
+            ext_mgr.set_extension_enabled_immediate("com.rizwan.siemens_plc", True)
+        print("[Siemens PLC] Extension (com.rizwan.siemens_plc) loaded successfully!")
     except Exception as e:
-        print(f"[PLC] Note on extension loading: {e}")
+        print(f"[Siemens PLC] Note on extension loading: {e}")
 
     # Connect to shared state bridge
-    sys.path.insert(0, os.path.abspath("extensions/com.rizwan.plc_bridge"))
+    sys.path.insert(0, os.path.abspath("extensions/com.rizwan.siemens_plc"))
     try:
-        from plc_bridge.bridge_state import RobotCellBridge
+        from siemens_plc.bridge_state import RobotCellBridge
         cell_bridge = RobotCellBridge.get()
         cell_bridge.plc_online = True
         cell_bridge.robot_state = PLC_IDLE
         cell_bridge.notify()
     except Exception as e:
-        print(f"[PLC] Note on bridge state: {e}")
+        print(f"[Siemens PLC] Note on bridge state: {e}")
 
     # Build runner and load trained weights
     agent_cfg = BallPickPlacePPORunnerCfg()
