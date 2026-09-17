@@ -13,7 +13,12 @@ import os
 import sys
 import time
 
-# ── 1. Suppress GitPython noise ──────────────────────────────────────────────
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# -- 1. Suppress GitPython noise ----------------------------------------------
 os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 
 # ── 2. Parse arguments & launch simulation via AppLauncher ───────────────────
@@ -141,13 +146,13 @@ def main():
     global plc_pending_cmd
 
     print("\n" + "=" * 78)
-    print("  FRANKA PANDA — AUTONOMOUS ROBOTIC CELL WITH INDUSTRIAL PLC PANEL")
+    print("  FRANKA PANDA - AUTONOMOUS ROBOTIC CELL WITH INDUSTRIAL PLC PANEL")
     print("  PLC Status: [ONLINE] (Bright Green Indicator)")
     print("  Controls:")
-    print("    ▶ [START] (Click button or press 'S') : Picks ball & places into bucket")
-    print("    ⏹ [STOP]  (Click button or press Space) : Immediately halts robot motion")
-    print("    ⟲ [RESET] (Click button or press 'R') : Returns arm directly to Home Standby")
-    print("    ● [SPAWN] (Press 'B') : Randomize ball on table (or place manually in viewport)")
+    print("    [START] (Click button or press 'S') : Picks ball & places into bucket")
+    print("    [STOP]  (Click button or press Space) : Immediately halts robot motion")
+    print("    [RESET] (Click button or press 'R') : Returns arm directly to Home Standby")
+    print("    [SPAWN] (Press 'B') : Randomize ball on table (or place manually in viewport)")
     print(f"  Checkpoint: {args_cli.checkpoint}")
     print("=" * 78 + "\n")
 
@@ -164,6 +169,30 @@ def main():
         env.unwrapped.sim.set_camera_view(eye=(1.15, -0.55, 0.85), target=(0.35, 0.15, 0.45))
 
     env = RslRlVecEnvWrapper(env)
+
+    # ── Automatically Load & Enable Siemens PLC Bridge Extension ─────────────
+    cell_bridge = None
+    try:
+        import omni.kit.app
+        ext_mgr = omni.kit.app.get_app().get_extension_manager()
+        ext_folder = os.path.abspath("extensions")
+        ext_mgr.add_path(ext_folder)
+        if not ext_mgr.is_extension_enabled("com.rizwan.plc_bridge"):
+            ext_mgr.set_extension_enabled_immediate("com.rizwan.plc_bridge", True)
+        print("[PLC] Siemens PLC Bridge Extension (com.rizwan.plc_bridge) loaded successfully!")
+    except Exception as e:
+        print(f"[PLC] Note on extension loading: {e}")
+
+    # Connect to shared state bridge
+    sys.path.insert(0, os.path.abspath("extensions/com.rizwan.plc_bridge"))
+    try:
+        from plc_bridge.bridge_state import RobotCellBridge
+        cell_bridge = RobotCellBridge.get()
+        cell_bridge.plc_online = True
+        cell_bridge.robot_state = PLC_IDLE
+        cell_bridge.notify()
+    except Exception as e:
+        print(f"[PLC] Note on bridge state: {e}")
 
     # Build runner and load trained weights
     agent_cfg = BallPickPlacePPORunnerCfg()
@@ -216,6 +245,12 @@ def main():
         while True:
             total_steps += 1
 
+            # ── 0. Poll Siemens PLC Bridge Extension UI & OPC UA Commands ───
+            if cell_bridge:
+                b_cmd = cell_bridge.pop_command()
+                if b_cmd:
+                    plc_pending_cmd = b_cmd
+
             # ── 1. Process Hotkeys & Mouse PLC Commands ──────────────────────
             key = cv2.waitKey(1) & 0xFF if (args_cli.show_camera and not getattr(args_cli, "headless", False)) else 255
             if key in [ord('s'), ord('S')]:
@@ -238,6 +273,11 @@ def main():
                 b_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.unwrapped.device)
                 b_state[:, 7:13] = 0.0
                 ball.write_root_state_to_sim(b_state)
+                if cell_bridge:
+                    cell_bridge.ball_x = rx
+                    cell_bridge.ball_y = ry
+                    cell_bridge.status_message = f"Ball randomized on table at X={rx:.3f}m, Y={ry:.3f}m"
+                    cell_bridge.notify()
                 print(f"[PLC] Spawned ball on table at X={rx:.3f}m, Y={ry:.3f}m", flush=True)
             elif key in [27, ord('q'), ord('Q')]:
                 print("[INFO]: Quit requested. Exiting demonstration.")
@@ -259,6 +299,11 @@ def main():
                     b_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.unwrapped.device)
                     b_state[:, 7:13] = 0.0
                     ball.write_root_state_to_sim(b_state)
+                    if cell_bridge:
+                        cell_bridge.ball_x = rx
+                        cell_bridge.ball_y = ry
+                        cell_bridge.status_message = f"Ball placed at X={rx:.3f}m, Y={ry:.3f}m"
+                        cell_bridge.notify()
                     print(f"[PLC] Ball positioned at click: X={rx:.3f}m, Y={ry:.3f}m", flush=True)
 
                 elif cmd == "SPAWN_BALL":
@@ -274,6 +319,11 @@ def main():
                     b_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.unwrapped.device)
                     b_state[:, 7:13] = 0.0
                     ball.write_root_state_to_sim(b_state)
+                    if cell_bridge:
+                        cell_bridge.ball_x = rx
+                        cell_bridge.ball_y = ry
+                        cell_bridge.status_message = f"Ball spawned at X={rx:.3f}m, Y={ry:.3f}m"
+                        cell_bridge.notify()
                     print(f"[PLC] Ball spawned at random table spot: X={rx:.3f}m, Y={ry:.3f}m", flush=True)
 
                 elif cmd == "START":
@@ -283,15 +333,27 @@ def main():
                         cycle_start_time = time.time()
                         smoother.reset()
                         policy.reset()
+                        if cell_bridge:
+                            cell_bridge.robot_state = plc_state
+                            cell_bridge.status_message = f"Cycle {cycle_count + 1} initiated -> Running Pick & Place"
+                            cell_bridge.notify()
                         print(f"\n[PLC PANEL] ▶ START: Cycle {cycle_count + 1} initiated!", flush=True)
 
                 elif cmd == "STOP":
                     plc_state = PLC_STOPPED
+                    if cell_bridge:
+                        cell_bridge.robot_state = plc_state
+                        cell_bridge.status_message = "Robot halted (Hold position)"
+                        cell_bridge.notify()
                     print("\n[PLC PANEL] ⏹ STOP: Arm motion halted. Holding position.", flush=True)
 
                 elif cmd == "RESET":
                     plc_state = PLC_RESETTING
                     smoother.reset()
+                    if cell_bridge:
+                        cell_bridge.robot_state = plc_state
+                        cell_bridge.status_message = "Homing arm to Standby pose [0.35, 0.00, 0.65]"
+                        cell_bridge.notify()
                     print("\n[PLC PANEL] ⟲ RESET: Returning Franka Panda to Standby Home pose...", flush=True)
 
             # ── 2. PLC Execution Branch ──────────────────────────────────────
@@ -328,6 +390,10 @@ def main():
                     state = STATE_RL
                     smoother.reset()
                     policy.reset()
+                    if cell_bridge:
+                        cell_bridge.robot_state = plc_state
+                        cell_bridge.status_message = "At Standby Home pose. Ready for START."
+                        cell_bridge.notify()
                     print(f"[PLC] Reached Home Standby pose ({dist_to_home*1000:.1f}mm). Ready for START.", flush=True)
 
             elif plc_state == PLC_RUNNING:
@@ -419,6 +485,10 @@ def main():
                         cycle_count += 1
                         results.append((cycle_count, duration, "SUCCESS"))
                         print(f" [RESULT] Cycle {cycle_count}: SUCCESS! Ball placed & settled in cavity in {duration:.2f}s! -> Retracting to Home...", flush=True)
+                        if cell_bridge:
+                            cell_bridge.cycle_count = cycle_count
+                            cell_bridge.status_message = f"Cycle {cycle_count} SUCCESS in {duration:.2f}s! Retracting..."
+                            cell_bridge.notify()
                         state = STATE_RETRACT
                         retract_step = 0
                     elif settle_step >= 25:
@@ -426,6 +496,10 @@ def main():
                         cycle_count += 1
                         results.append((cycle_count, duration, "FAILED"))
                         print(f" [RESULT] Cycle {cycle_count}: FAILED! Proceeding to Retract...", flush=True)
+                        if cell_bridge:
+                            cell_bridge.cycle_count = cycle_count
+                            cell_bridge.status_message = f"Cycle {cycle_count} FAILED! Retracting..."
+                            cell_bridge.notify()
                         state = STATE_RETRACT
                         retract_step = 0
 
@@ -449,6 +523,10 @@ def main():
                         state = STATE_RL
                         smoother.reset()
                         policy.reset()
+                        if cell_bridge:
+                            cell_bridge.robot_state = plc_state
+                            cell_bridge.status_message = "Ready for next cycle. Place ball and click START."
+                            cell_bridge.notify()
 
             # Max steps guard
             if args_cli.max_steps is not None and total_steps >= args_cli.max_steps:
