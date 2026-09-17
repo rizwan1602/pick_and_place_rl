@@ -86,15 +86,16 @@ PLC_STOPPED = "STOPPED"     # Motion halted (arm holds position)
 PLC_RESETTING = "RESETTING" # Retracting arm to Home Standby pose
 
 # Button bounding boxes on OpenCV window (x, y, w, h) - compact in top right corner
-BTN_START = (345, 14, 90, 40)
-BTN_STOP  = (442, 14, 88, 40)
-BTN_RESET = (537, 14, 92, 40)
+BTN_START = (315, 14, 76, 40)
+BTN_STOP  = (396, 14, 72, 40)
+BTN_RESET = (473, 14, 76, 40)
+BTN_BALL  = (554, 14, 76, 40)
 
 plc_pending_cmd = None
 
 
 def on_mouse_click(event, x, y, flags, param):
-    """Mouse click handler for OpenCV PLC control buttons."""
+    """Mouse click handler for OpenCV PLC control buttons and table click-to-place."""
     global plc_pending_cmd
     if event == cv2.EVENT_LBUTTONDOWN:
         if BTN_START[0] <= x <= BTN_START[0] + BTN_START[2] and BTN_START[1] <= y <= BTN_START[1] + BTN_START[3]:
@@ -103,6 +104,15 @@ def on_mouse_click(event, x, y, flags, param):
             plc_pending_cmd = "STOP"
         elif BTN_RESET[0] <= x <= BTN_RESET[0] + BTN_RESET[2] and BTN_RESET[1] <= y <= BTN_RESET[1] + BTN_RESET[3]:
             plc_pending_cmd = "RESET"
+        elif BTN_BALL[0] <= x <= BTN_BALL[0] + BTN_BALL[2] and BTN_BALL[1] <= y <= BTN_BALL[1] + BTN_BALL[3]:
+            plc_pending_cmd = "SPAWN_BALL"
+        elif 70 <= y <= 450:
+            # Click directly on the camera view to place ball at clicked position!
+            norm_x = (x - 320) / 320.0
+            norm_y = (y - 260) / 200.0
+            target_y = float(np.clip(-norm_x * 0.22, -0.15, 0.15))
+            target_x = float(np.clip(0.40 - norm_y * 0.16, 0.28, 0.44))
+            plc_pending_cmd = ("MOVE_BALL", target_x, target_y)
 
 
 class ActionSmoother:
@@ -236,7 +246,37 @@ def main():
             if plc_pending_cmd:
                 cmd = plc_pending_cmd
                 plc_pending_cmd = None
-                if cmd == "START":
+
+                if isinstance(cmd, tuple) and cmd[0] == "MOVE_BALL":
+                    _, rx, ry = cmd
+                    rz = TABLE_TOP_Z + BALL_RADIUS + 0.002
+                    ball = env.unwrapped.scene["ball"]
+                    env_origins = env.unwrapped.scene.env_origins
+                    b_state = ball.data.default_root_state.clone()
+                    b_state[:, 0] = rx + env_origins[0, 0]
+                    b_state[:, 1] = ry + env_origins[0, 1]
+                    b_state[:, 2] = rz + env_origins[0, 2]
+                    b_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.unwrapped.device)
+                    b_state[:, 7:13] = 0.0
+                    ball.write_root_state_to_sim(b_state)
+                    print(f"[PLC] Ball positioned at click: X={rx:.3f}m, Y={ry:.3f}m", flush=True)
+
+                elif cmd == "SPAWN_BALL":
+                    rx = float(torch.empty(1).uniform_(0.28, 0.42).item())
+                    ry = float(torch.empty(1).uniform_(-0.12, 0.12).item())
+                    rz = TABLE_TOP_Z + BALL_RADIUS + 0.002
+                    ball = env.unwrapped.scene["ball"]
+                    env_origins = env.unwrapped.scene.env_origins
+                    b_state = ball.data.default_root_state.clone()
+                    b_state[:, 0] = rx + env_origins[0, 0]
+                    b_state[:, 1] = ry + env_origins[0, 1]
+                    b_state[:, 2] = rz + env_origins[0, 2]
+                    b_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.unwrapped.device)
+                    b_state[:, 7:13] = 0.0
+                    ball.write_root_state_to_sim(b_state)
+                    print(f"[PLC] Ball spawned at random table spot: X={rx:.3f}m, Y={ry:.3f}m", flush=True)
+
+                elif cmd == "START":
                     if plc_state != PLC_RUNNING:
                         plc_state = PLC_RUNNING
                         state = STATE_RL
@@ -244,9 +284,11 @@ def main():
                         smoother.reset()
                         policy.reset()
                         print(f"\n[PLC PANEL] ▶ START: Cycle {cycle_count + 1} initiated!", flush=True)
+
                 elif cmd == "STOP":
                     plc_state = PLC_STOPPED
                     print("\n[PLC PANEL] ⏹ STOP: Arm motion halted. Holding position.", flush=True)
+
                 elif cmd == "RESET":
                     plc_state = PLC_RESETTING
                     smoother.reset()
@@ -455,14 +497,14 @@ def main():
 
                     cv2.putText(bgr, f"| {st_text}", (195, 51), cv2.FONT_HERSHEY_SIMPLEX, 0.38, st_col, 1, cv2.LINE_AA)
 
-                    # 3 Clickable Buttons in One Single Place
+                    # 4 Clickable Buttons in One Single Place
                     # 1. START Button
                     bx1, by1, bw1, bh1 = BTN_START
                     start_bg = (20, 75, 20) if plc_state == PLC_RUNNING else (16, 42, 16)
                     start_border = (0, 255, 0) if plc_state == PLC_RUNNING else (0, 180, 0)
                     cv2.rectangle(bgr, (bx1, by1), (bx1 + bw1, by1 + bh1), start_bg, -1)
                     cv2.rectangle(bgr, (bx1, by1), (bx1 + bw1, by1 + bh1), start_border, 2)
-                    cv2.putText(bgr, "START", (bx1 + 18, by1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0) if plc_state != PLC_RUNNING else (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(bgr, "START", (bx1 + 10, by1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 0) if plc_state != PLC_RUNNING else (255, 255, 255), 2, cv2.LINE_AA)
 
                     # 2. STOP Button
                     bx2, by2, bw2, bh2 = BTN_STOP
@@ -470,7 +512,7 @@ def main():
                     stop_border = (0, 0, 255) if plc_state == PLC_STOPPED else (0, 0, 180)
                     cv2.rectangle(bgr, (bx2, by2), (bx2 + bw2, by2 + bh2), stop_bg, -1)
                     cv2.rectangle(bgr, (bx2, by2), (bx2 + bw2, by2 + bh2), stop_border, 2)
-                    cv2.putText(bgr, "STOP", (bx2 + 20, by2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (60, 60, 255) if plc_state != PLC_STOPPED else (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(bgr, "STOP", (bx2 + 12, by2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (60, 60, 255) if plc_state != PLC_STOPPED else (255, 255, 255), 2, cv2.LINE_AA)
 
                     # 3. RESET Button
                     bx3, by3, bw3, bh3 = BTN_RESET
@@ -478,12 +520,18 @@ def main():
                     reset_border = (255, 200, 0) if plc_state == PLC_RESETTING else (180, 140, 0)
                     cv2.rectangle(bgr, (bx3, by3), (bx3 + bw3, by3 + bh3), reset_bg, -1)
                     cv2.rectangle(bgr, (bx3, by3), (bx3 + bw3, by3 + bh3), reset_border, 2)
-                    cv2.putText(bgr, "RESET", (bx3 + 16, by3 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 220, 50) if plc_state != PLC_RESETTING else (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(bgr, "RESET", (bx3 + 10, by3 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 220, 50) if plc_state != PLC_RESETTING else (255, 255, 255), 2, cv2.LINE_AA)
+
+                    # 4. BALL Button (Spawn/Move)
+                    bx4, by4, bw4, bh4 = BTN_BALL
+                    cv2.rectangle(bgr, (bx4, by4), (bx4 + bw4, by4 + bh4), (45, 25, 60), -1)
+                    cv2.rectangle(bgr, (bx4, by4), (bx4 + bw4, by4 + bh4), (210, 120, 255), 2)
+                    cv2.putText(bgr, "BALL", (bx4 + 14, by4 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (230, 160, 255), 2, cv2.LINE_AA)
 
                     # ── Bottom Shortcut Bar ──────────────────────────────────
                     cv2.rectangle(bgr, (0, h - 28), (w, h), (18, 18, 18), -1)
-                    cv2.putText(bgr, "CONTROLS: Click buttons OR press [S]=Start  [Space]=Stop  [R]=Reset  [B]=Spawn Ball", 
-                                (12, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (170, 210, 170), 1, cv2.LINE_AA)
+                    cv2.putText(bgr, "CONTROLS: Click buttons OR press [S]=Start  [Space]=Stop  [R]=Reset  [B]=Spawn Ball  | Click table to place ball", 
+                                (8, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (170, 210, 170), 1, cv2.LINE_AA)
 
                     # Red ball tracker
                     hsv = cv2.cvtColor(bgr[68:h-28, :], cv2.COLOR_BGR2HSV)
